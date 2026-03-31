@@ -1,5 +1,7 @@
 # Linux Ryzen undervolt UI
-THIS IS STILL IN ACTIVE DEVELOPMENT AND NOT MEANT TO BE USED BY REGULAR USERS 
+THIS IS STILL IN ACTIVE DEVELOPMENT AND NOT MEANT TO BE USED BY REGULAR USERS
+
+I ONLY TESTED THIS ON MY 5700x3d
 # What is it ?
 This is a linux implementation of the PBO2 undevolting tool used to undervolt Ryzen CPUs in Windows. More info on how to do it in Windows is here: https://github.com/PrimeO7/How-to-undervolt-AMD-RYZEN-5800X3D-Guide-with-PBO2-Tuner
 # How to use it ?
