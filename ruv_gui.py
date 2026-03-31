@@ -337,8 +337,6 @@ class MainWindow(QMainWindow):
             self.output.setText(output)
         except Exception as e:
             self.output.setText(str(e))
-        except Exception as e:
-            self.output.setText(str(e))
 
     def reset_offsets(self):
         try:
