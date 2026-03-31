@@ -7,7 +7,7 @@ This is a linux implementation of the PBO2 undervolting tool with a gui and cli.
 # How to use it ?
 1. Clone this repository: https://github.com/amkillam/ryzen_smu and install the Ryzen SMU driver that makes comunication with Ryzen SMU (System Management Unit) possible
 ```pwsh
-git clone https://github.com/amkillam/ryzen_smu
+git clone https://github.com/amkillam/ryzen_smu.git
 cd ryzen_smu
 sudo make dkms-install
 ```
