@@ -12,3 +12,9 @@ cd ryzen_smu
 sudo make dkms-install
 ```
 Now make a reboot. The dkms-install should make a new module into you system called "ryzen_smu". It will autostart next time you reboot your system. Without it the provided Python script will not function.
+
+2. Clone and run the python file
+```pwsh
+git clone https://github.com/softwaresocialist/linux-ryzen-undervolt-ui.git
+cd linux-ryzen-undervolt-ui
+python3 ruv_gui.py
