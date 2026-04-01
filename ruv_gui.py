@@ -11,6 +11,7 @@ import struct
 import subprocess
 import time
 import argparse
+import json                               # <-- added for JSON handling
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -19,7 +20,7 @@ os.environ["QT_LOGGING_RULES"] = "qt.qpa.theme=false"
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton,
     QTextEdit, QVBoxLayout, QHBoxLayout,
-    QWidget, QLabel, QSpinBox, QMessageBox
+    QWidget, QLabel, QSpinBox, QMessageBox, QFileDialog   # <-- added QFileDialog
 )
 
 
@@ -214,7 +215,9 @@ def cli_mode():
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("list")
+    # list command – now supports --json flag
+    list_parser = subparsers.add_parser("list")
+    list_parser.add_argument("--json", action="store_true", help="Output offsets in JSON format")
 
     get_parser = subparsers.add_parser("get")
     get_parser.add_argument("core", type=int)
@@ -228,6 +231,10 @@ def cli_mode():
     range_parser.add_argument("end", type=int)
     range_parser.add_argument("offset", type=int)
 
+    # New command: apply-file
+    apply_file_parser = subparsers.add_parser("apply-file")
+    apply_file_parser.add_argument("file", type=str, help="JSON file containing core:offset pairs")
+
     subparsers.add_parser("reset")
 
     args = parser.parse_args()
@@ -240,8 +247,14 @@ def cli_mode():
 
     try:
         if args.command == "list":
-            for core in get_physical_core_ids():
-                print(f"{core}: {smu.get_core_offset(core)}")
+            if args.json:
+                offsets = {}
+                for core in get_physical_core_ids():
+                    offsets[core] = smu.get_core_offset(core)
+                print(json.dumps(offsets))
+            else:
+                for core in get_physical_core_ids():
+                    print(f"{core}: {smu.get_core_offset(core)}")
 
         elif args.command == "get":
             print(smu.get_core_offset(args.core))
@@ -256,6 +269,14 @@ def cli_mode():
 
             for core in range(args.start, args.end + 1):
                 print(f"{core}: {smu.get_core_offset(core)}")
+
+        elif args.command == "apply-file":
+            with open(args.file) as f:
+                data = json.load(f)
+            # data should be dict {core: offset}
+            for core, offset in data.items():
+                smu.set_core_offset(int(core), offset)
+            print("OK: Offsets applied from file")
 
         elif args.command == "reset":
             smu.reset_all_offsets()
@@ -287,6 +308,7 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout()
         central.setLayout(main_layout)
 
+        # Existing controls (offset and cores)
         controls_layout = QHBoxLayout()
 
         controls_layout.addWidget(QLabel("Offset:"))
@@ -311,6 +333,7 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(controls_layout)
 
+        # Buttons row (List, Reset)
         button_row = QHBoxLayout()
 
         self.btn_list = QPushButton("Show Current Offsets")
@@ -321,14 +344,26 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(button_row)
 
+        # Save/Load buttons row (new)
+        save_load_layout = QHBoxLayout()
+        self.btn_save = QPushButton("Save Offsets to File")
+        self.btn_load = QPushButton("Load Offsets from File")
+        save_load_layout.addWidget(self.btn_save)
+        save_load_layout.addWidget(self.btn_load)
+        main_layout.addLayout(save_load_layout)
+
+        # Output text area
         self.output = QTextEdit()
         self.output.setReadOnly(True)
 
         main_layout.addWidget(self.output)
 
+        # Connect signals
         self.btn_list.clicked.connect(self.list_offsets)
         self.btn_reset.clicked.connect(self.reset_offsets)
         self.btn_apply.clicked.connect(self.apply_offset)
+        self.btn_save.clicked.connect(self.save_offsets)   # new
+        self.btn_load.clicked.connect(self.load_offsets)   # new
 
     def list_offsets(self):
         try:
@@ -370,12 +405,10 @@ class MainWindow(QMainWindow):
         selected_cores = self.core_ids[:cores]
 
         try:
-
-            # Apply offsets in one privileged batch instead of multiple pkexec calls
+            # Apply offsets in one privileged batch
             start_core = selected_cores[0]
             end_core = selected_cores[-1]
 
-            # Apply offsets and reuse returned output (avoid second pkexec call)
             output = run_privileged([
                 "apply-range",
                 str(start_core),
@@ -387,6 +420,40 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.output.setText(f"Error applying: {str(e)}")
+
+    # New method: Save current offsets to a JSON file
+    def save_offsets(self):
+        try:
+            # Get offsets as JSON using the CLI
+            output = run_privileged(["list", "--json"])
+            offsets = json.loads(output)
+
+            # Ask user for file location
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Offsets", "", "JSON Files (*.json);;All Files (*)"
+            )
+            if file_path:
+                with open(file_path, "w") as f:
+                    json.dump(offsets, f, indent=2)
+                self.output.setText(f"Saved offsets to {file_path}")
+        except Exception as e:
+            self.output.setText(f"Error saving offsets: {str(e)}")
+
+    # New method: Load offsets from a JSON file and apply them
+    def load_offsets(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Offsets", "", "JSON Files (*.json);;All Files (*)"
+        )
+        if not file_path:
+            return
+        try:
+            # Apply offsets from file in one privileged call
+            output = run_privileged(["apply-file", file_path])
+            self.output.setText(output)
+            # Refresh display after applying
+            self.list_offsets()
+        except Exception as e:
+            self.output.setText(f"Error loading offsets: {str(e)}")
 
 
 if __name__ == "__main__":
