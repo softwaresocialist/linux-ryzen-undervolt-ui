@@ -3,6 +3,8 @@
 Linux Undervolt Tool for Ryzen CPUs using the ryzen_smu kernel driver.
 Allows reading and setting voltage offsets per core.
 
+WARNING: This tool writes to the SMU (System Management Unit) of your Ryzen CPU.
+Incorrect offsets may cause system instability or damage. Use at your own risk.
 """
 
 import sys
@@ -11,20 +13,22 @@ import struct
 import subprocess
 import time
 import argparse
-import json                               # <-- added for JSON handling
+import json
+import shutil
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import List
 
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.theme=false"
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton,
     QTextEdit, QVBoxLayout, QHBoxLayout,
-    QWidget, QLabel, QSpinBox, QMessageBox, QFileDialog   # <-- added QFileDialog
+    QWidget, QLabel, QSpinBox, QMessageBox, QFileDialog
 )
 
 
 class RyzenSMU:
+    """Low-level interface to the ryzen_smu kernel driver."""
     FS_PATH = Path("/sys/kernel/ryzen_smu_drv/")
     VER_PATH = FS_PATH / "version"
     SMU_ARGS = FS_PATH / "smu_args"
@@ -81,9 +85,10 @@ class RyzenSMU:
         return cls._write_file(file, data) == 24
 
     def smu_command(self, op: int, arg1=0, arg2=0, arg3=0, arg4=0, arg5=0, arg6=0):
+        """Send SMU command, wait for completion, return 6-word response."""
         start = time.monotonic()
 
-        # Wait until SMU ready
+        # Wait for SMU to become ready (status == 1)
         while True:
             status = self._read_file32(self.MP1_CMD)
             if status is None:
@@ -100,6 +105,7 @@ class RyzenSMU:
 
             time.sleep(0.05)
 
+        # Write arguments and issue command
         if not self._write_file192(self.SMU_ARGS, arg1, arg2, arg3, arg4, arg5, arg6):
             raise RuntimeError("Failed to write SMU arguments")
 
@@ -108,7 +114,7 @@ class RyzenSMU:
 
         start = time.monotonic()
 
-        # Wait for completion
+        # Wait for command completion (status returns to 1)
         while True:
             status = self._read_file32(self.MP1_CMD)
 
@@ -134,6 +140,7 @@ class RyzenSMU:
         return response
 
     def get_core_offset(self, core_id: int):
+        # Core ID encoding for SMU: ( (core_id & 8) << 5 | (core_id & 7) ) << 20
         arg = ((core_id & 8) << 5 | (core_id & 7)) << 20
 
         try:
@@ -143,6 +150,7 @@ class RyzenSMU:
 
         value = result[0]
 
+        # Convert to signed 32-bit
         if value > 2**31 - 1:
             value -= 2**32
 
@@ -156,20 +164,21 @@ class RyzenSMU:
         try:
             self.smu_command(self.CMD_SET_OFFSET, arg)
         except Exception:
+            # Rollback on failure
             if old_offset is not None:
                 try:
                     rollback_arg = (((core_id & 8) << 5 | (core_id & 7)) << 20) | (old_offset & 0xFFFF)
                     self.smu_command(self.CMD_SET_OFFSET, rollback_arg)
                 except Exception:
                     pass
-
             raise
 
     def reset_all_offsets(self):
         self.smu_command(self.CMD_RESET_ALL, 0)
 
 
-def get_physical_core_ids():
+def get_physical_core_ids() -> List[int]:
+    """Read actual core IDs from sysfs topology."""
     cpu_path = Path("/sys/devices/system/cpu")
     core_ids = set()
 
@@ -183,14 +192,20 @@ def get_physical_core_ids():
             except Exception:
                 pass
 
+    if not core_ids:
+        return list(range(8))  # fallback
+
     return sorted(core_ids)
 
 
 SCRIPT_PATH = Path(__file__).resolve()
 
 
-def run_privileged(args):
-    # Avoid recursive pkexec calls if already root
+def run_privileged(args: List[str]) -> str:
+    """Run a CLI command with pkexec (or directly if already root)."""
+    if os.geteuid() != 0 and not shutil.which("pkexec"):
+        raise RuntimeError("pkexec not found. Please install polkit or run this script as root.")
+
     if os.geteuid() == 0:
         result = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--"] + args,
@@ -215,7 +230,6 @@ def cli_mode():
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # list command – now supports --json flag
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--json", action="store_true", help="Output offsets in JSON format")
 
@@ -226,14 +240,12 @@ def cli_mode():
     set_parser.add_argument("core", type=int)
     set_parser.add_argument("offset", type=int)
 
-    range_parser = subparsers.add_parser("apply-range")
-    range_parser.add_argument("start", type=int)
-    range_parser.add_argument("end", type=int)
-    range_parser.add_argument("offset", type=int)
+    apply_list_parser = subparsers.add_parser("apply-list")
+    apply_list_parser.add_argument("cores", type=int, nargs="+", help="List of core IDs")
+    apply_list_parser.add_argument("offset", type=int)
 
-    # New command: apply-file
     apply_file_parser = subparsers.add_parser("apply-file")
-    apply_file_parser.add_argument("file", type=str, help="JSON file containing core:offset pairs")
+    apply_file_parser.add_argument("file", type=str, help="JSON file with core:offset pairs")
 
     subparsers.add_parser("reset")
 
@@ -244,16 +256,15 @@ def cli_mode():
         sys.exit(1)
 
     smu = RyzenSMU()
+    physical_cores = get_physical_core_ids()
 
     try:
         if args.command == "list":
             if args.json:
-                offsets = {}
-                for core in get_physical_core_ids():
-                    offsets[core] = smu.get_core_offset(core)
+                offsets = {core: smu.get_core_offset(core) for core in physical_cores}
                 print(json.dumps(offsets))
             else:
-                for core in get_physical_core_ids():
+                for core in physical_cores:
                     print(f"{core}: {smu.get_core_offset(core)}")
 
         elif args.command == "get":
@@ -263,20 +274,29 @@ def cli_mode():
             smu.set_core_offset(args.core, args.offset)
             print(f"OK: Core {args.core} set to {args.offset}")
 
-        elif args.command == "apply-range":
-            for core in range(args.start, args.end + 1):
+        elif args.command == "apply-list":
+            for core in args.cores:
                 smu.set_core_offset(core, args.offset)
-
-            for core in range(args.start, args.end + 1):
+            for core in args.cores:
                 print(f"{core}: {smu.get_core_offset(core)}")
 
         elif args.command == "apply-file":
             with open(args.file) as f:
                 data = json.load(f)
-            # data should be dict {core: offset}
-            for core, offset in data.items():
-                smu.set_core_offset(int(core), offset)
-            print("OK: Offsets applied from file")
+            if not isinstance(data, dict):
+                raise ValueError("JSON must be an object with core:offset pairs")
+
+            for core_str, offset in data.items():
+                core = int(core_str)
+                if core not in physical_cores:
+                    print(f"Warning: Core {core} does not exist, skipping", file=sys.stderr)
+                    continue
+                smu.set_core_offset(core, offset)
+
+            # Print new offsets after applying (GUI uses this to refresh)
+            print("OK: Offsets applied from file. Current offsets:")
+            for core in physical_cores:
+                print(f"{core}: {smu.get_core_offset(core)}")
 
         elif args.command == "reset":
             smu.reset_all_offsets()
@@ -288,7 +308,6 @@ def cli_mode():
 
 
 class MainWindow(QMainWindow):
-
     def __init__(self):
         super().__init__()
 
@@ -296,7 +315,6 @@ class MainWindow(QMainWindow):
         self.resize(600, 400)
 
         self.core_ids = get_physical_core_ids()
-
         if not self.core_ids:
             self.core_ids = list(range(8))
 
@@ -308,43 +326,37 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout()
         central.setLayout(main_layout)
 
-        # Existing controls (offset and cores)
+        # Offset input and core count selector
         controls_layout = QHBoxLayout()
-
-        controls_layout.addWidget(QLabel("Offset:"))
+        controls_layout.addWidget(QLabel("Offset (mV):"))
 
         self.offset_spin = QSpinBox()
         self.offset_spin.setRange(-32768, 32767)
         self.offset_spin.setValue(0)
-
         controls_layout.addWidget(self.offset_spin)
 
-        controls_layout.addWidget(QLabel("Cores:"))
+        controls_layout.addWidget(QLabel("Number of cores:"))
 
         self.core_spin = QSpinBox()
         self.core_spin.setRange(1, self.max_cores)
         self.core_spin.setValue(self.max_cores)
-
         controls_layout.addWidget(self.core_spin)
-        controls_layout.addWidget(QLabel(f"(max {self.max_cores})"))
+
+        controls_layout.addStretch()  # pushes the button to the right
 
         self.btn_apply = QPushButton("Apply Offset")
         controls_layout.addWidget(self.btn_apply)
-
         main_layout.addLayout(controls_layout)
 
-        # Buttons row (List, Reset)
+        # Action buttons
         button_row = QHBoxLayout()
-
         self.btn_list = QPushButton("Show Current Offsets")
-        self.btn_reset = QPushButton("Reset All Offsets (0)")
-
+        self.btn_reset = QPushButton("Reset All Offsets")
         button_row.addWidget(self.btn_list)
         button_row.addWidget(self.btn_reset)
-
         main_layout.addLayout(button_row)
 
-        # Save/Load buttons row (new)
+        # File operations
         save_load_layout = QHBoxLayout()
         self.btn_save = QPushButton("Save Offsets to File")
         self.btn_load = QPushButton("Load Offsets from File")
@@ -355,19 +367,17 @@ class MainWindow(QMainWindow):
         # Output text area
         self.output = QTextEdit()
         self.output.setReadOnly(True)
-
         main_layout.addWidget(self.output)
 
-        # Connect signals
+        # Signal connections
         self.btn_list.clicked.connect(self.list_offsets)
         self.btn_reset.clicked.connect(self.reset_offsets)
         self.btn_apply.clicked.connect(self.apply_offset)
-        self.btn_save.clicked.connect(self.save_offsets)   # new
-        self.btn_load.clicked.connect(self.load_offsets)   # new
+        self.btn_save.clicked.connect(self.save_offsets)
+        self.btn_load.clicked.connect(self.load_offsets)
 
     def list_offsets(self):
         try:
-            # Single privileged call
             output = run_privileged(["list"])
             self.output.setText(output)
         except Exception as e:
@@ -375,60 +385,43 @@ class MainWindow(QMainWindow):
 
     def reset_offsets(self):
         try:
-            self.output.setText(run_privileged(["reset"]))
+            output = run_privileged(["reset"])
+            self.output.setText(output)
         except Exception as e:
             self.output.setText(str(e))
 
     def apply_offset(self):
-
         offset = self.offset_spin.value()
-        cores = self.core_spin.value()
+        num_cores = self.core_spin.value()
 
+        # Warn if offset is far outside typical range
         if offset < -30 or offset > 30:
-
             reply = QMessageBox.warning(
                 self,
                 "Offset Warning",
-                (
-                    f"Offset {offset} is outside the typical ±30 range.\n"
-                    "The ryzen_smu driver or SMU firmware may not support this value.\n"
-                    "Continue?"
-                ),
-                QMessageBox.StandardButton.Yes |
-                QMessageBox.StandardButton.No,
+                f"Offset {offset} mV is outside the typical ±30 mV range.\n"
+                "The ryzen_smu driver or SMU firmware may not support this value.\n"
+                "Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
             )
-
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        selected_cores = self.core_ids[:cores]
+        # Apply to first N physical cores
+        selected_cores = self.core_ids[:num_cores]
 
         try:
-            # Apply offsets in one privileged batch
-            start_core = selected_cores[0]
-            end_core = selected_cores[-1]
-
-            output = run_privileged([
-                "apply-range",
-                str(start_core),
-                str(end_core),
-                str(offset)
-            ])
-
+            output = run_privileged(["apply-list"] + [str(c) for c in selected_cores] + [str(offset)])
             self.output.setText(output)
-
         except Exception as e:
             self.output.setText(f"Error applying: {str(e)}")
 
-    # New method: Save current offsets to a JSON file
     def save_offsets(self):
         try:
-            # Get offsets as JSON using the CLI
             output = run_privileged(["list", "--json"])
             offsets = json.loads(output)
 
-            # Ask user for file location
             file_path, _ = QFileDialog.getSaveFileName(
                 self, "Save Offsets", "", "JSON Files (*.json);;All Files (*)"
             )
@@ -439,7 +432,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.output.setText(f"Error saving offsets: {str(e)}")
 
-    # New method: Load offsets from a JSON file and apply them
     def load_offsets(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Load Offsets", "", "JSON Files (*.json);;All Files (*)"
@@ -447,30 +439,25 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
         try:
-            # Apply offsets from file in one privileged call
             output = run_privileged(["apply-file", file_path])
-            self.output.setText(output)
-            # Refresh display after applying
-            self.list_offsets()
+            self.output.setText(output)  # Output already includes new offsets
         except Exception as e:
             self.output.setText(f"Error loading offsets: {str(e)}")
 
 
 if __name__ == "__main__":
+    # Prevent running GUI as root
+    if len(sys.argv) == 1 and os.geteuid() == 0:
+        print("ERROR: Do not run the GUI as root.", file=sys.stderr)
+        sys.exit(1)
 
     if len(sys.argv) > 1:
-
+        # Strip the '--' marker used by run_privileged
         if sys.argv[1] == "--" and len(sys.argv) > 2:
             sys.argv = [sys.argv[0]] + sys.argv[2:]
-
         cli_mode()
-
     else:
-
         app = QApplication(sys.argv)
-
         window = MainWindow()
-
         window.show()
-
         sys.exit(app.exec())
