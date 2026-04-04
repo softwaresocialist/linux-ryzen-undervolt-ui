@@ -15,6 +15,7 @@ import time
 import argparse
 import json
 import shutil
+import tempfile
 from pathlib import Path
 from typing import List
 
@@ -23,7 +24,8 @@ os.environ["QT_LOGGING_RULES"] = "qt.qpa.theme=false"
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton,
     QTextEdit, QVBoxLayout, QHBoxLayout,
-    QWidget, QLabel, QSpinBox, QMessageBox, QFileDialog
+    QWidget, QLabel, QSpinBox, QMessageBox,
+    QComboBox, QInputDialog
 )
 
 
@@ -312,7 +314,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Linux Undervolt Tool")
-        self.resize(600, 400)
+        self.resize(600, 500)
 
         self.core_ids = get_physical_core_ids()
         if not self.core_ids:
@@ -326,7 +328,7 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout()
         central.setLayout(main_layout)
 
-        # Offset input and core count selector
+        # Offset input and core count selector (all left-aligned, button on right)
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(QLabel("Offset (mV):"))
 
@@ -342,8 +344,7 @@ class MainWindow(QMainWindow):
         self.core_spin.setValue(self.max_cores)
         controls_layout.addWidget(self.core_spin)
 
-        controls_layout.addStretch()  # pushes the button to the right
-
+        controls_layout.addStretch()  # pushes button to right
         self.btn_apply = QPushButton("Apply Offset")
         controls_layout.addWidget(self.btn_apply)
         main_layout.addLayout(controls_layout)
@@ -356,25 +357,51 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.btn_reset)
         main_layout.addLayout(button_row)
 
-        # File operations
-        save_load_layout = QHBoxLayout()
-        self.btn_save = QPushButton("Save Offsets to File")
-        self.btn_load = QPushButton("Load Offsets from File")
-        save_load_layout.addWidget(self.btn_save)
-        save_load_layout.addWidget(self.btn_load)
-        main_layout.addLayout(save_load_layout)
+        # Profile management
+        profile_layout = QHBoxLayout()
+        profile_layout.addWidget(QLabel("Profile:"))
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.setMinimumWidth(200)
+        profile_layout.addWidget(self.profile_combo)
+
+        self.btn_save_profile = QPushButton("Save Current as Profile")
+        self.btn_delete_profile = QPushButton("Delete Profile")
+        self.btn_apply_profile = QPushButton("Apply Profile")
+        self.btn_update_profile = QPushButton("Update Profile with Offset")
+        profile_layout.addWidget(self.btn_save_profile)
+        profile_layout.addWidget(self.btn_delete_profile)
+        profile_layout.addWidget(self.btn_apply_profile)
+        profile_layout.addWidget(self.btn_update_profile)
+        main_layout.addLayout(profile_layout)
+
+        # Boot service management
+        boot_layout = QHBoxLayout()
+        self.btn_set_boot = QPushButton("Set as Boot Profile")
+        self.btn_remove_boot = QPushButton("Remove Boot Service")
+        boot_layout.addWidget(self.btn_set_boot)
+        boot_layout.addWidget(self.btn_remove_boot)
+        boot_layout.addStretch()
+        main_layout.addLayout(boot_layout)
 
         # Output text area
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         main_layout.addWidget(self.output)
 
-        # Signal connections
+        # Connect signals
         self.btn_list.clicked.connect(self.list_offsets)
         self.btn_reset.clicked.connect(self.reset_offsets)
         self.btn_apply.clicked.connect(self.apply_offset)
-        self.btn_save.clicked.connect(self.save_offsets)
-        self.btn_load.clicked.connect(self.load_offsets)
+        self.btn_save_profile.clicked.connect(self.save_current_as_profile)
+        self.btn_delete_profile.clicked.connect(self.delete_profile)
+        self.btn_apply_profile.clicked.connect(self.apply_profile)
+        self.btn_update_profile.clicked.connect(self.update_profile_with_offset)
+        self.btn_set_boot.clicked.connect(self.set_as_boot_profile)
+        self.btn_remove_boot.clicked.connect(self.remove_boot_service)
+
+        # Initialise profile list
+        self.refresh_profile_list()
 
     def list_offsets(self):
         try:
@@ -394,7 +421,6 @@ class MainWindow(QMainWindow):
         offset = self.offset_spin.value()
         num_cores = self.core_spin.value()
 
-        # Warn if offset is far outside typical range
         if offset < -30 or offset > 30:
             reply = QMessageBox.warning(
                 self,
@@ -408,51 +434,232 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        # Apply to first N physical cores
         selected_cores = self.core_ids[:num_cores]
-
         try:
             output = run_privileged(["apply-list"] + [str(c) for c in selected_cores] + [str(offset)])
             self.output.setText(output)
         except Exception as e:
             self.output.setText(f"Error applying: {str(e)}")
 
-    def save_offsets(self):
+    def refresh_profile_list(self):
+        """Scan /etc/ruv/profiles/ and update the combo box."""
+        profiles_dir = Path("/etc/ruv/profiles")
+        self.profile_combo.clear()
         try:
-            output = run_privileged(["list", "--json"])
-            offsets = json.loads(output)
-
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "Save Offsets", "", "JSON Files (*.json);;All Files (*)"
-            )
-            if file_path:
-                with open(file_path, "w") as f:
-                    json.dump(offsets, f, indent=2)
-                self.output.setText(f"Saved offsets to {file_path}")
+            if profiles_dir.exists():
+                for f in profiles_dir.glob("*.json"):
+                    self.profile_combo.addItem(f.stem)
         except Exception as e:
-            self.output.setText(f"Error saving offsets: {str(e)}")
+            self.output.append(f"Error scanning profiles: {e}")
 
-    def load_offsets(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Load Offsets", "", "JSON Files (*.json);;All Files (*)"
+    def save_current_as_profile(self):
+        """Save current offsets as a new profile – only one password prompt."""
+        name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if "/" in name or ".." in name:
+            self.output.setText("Invalid profile name (cannot contain '/' or '..')")
+            return
+
+        profiles_dir = "/etc/ruv/profiles"
+        json_path = f"{profiles_dir}/{name}.json"
+
+        # Single pkexec call: create directory and write offsets JSON
+        cmd = [
+            "pkexec", "bash", "-c",
+            f"mkdir -p {profiles_dir} && {sys.executable} {SCRIPT_PATH} -- list --json > {json_path}"
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+            self.output.setText(f"Profile '{name}' saved successfully.")
+            self.refresh_profile_list()
+            index = self.profile_combo.findText(name)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+        except Exception as e:
+            self.output.setText(f"Error saving profile: {e}")
+
+    def delete_profile(self):
+        """Delete the selected profile and reset all offsets to 0 – one password prompt."""
+        name = self.profile_combo.currentText()
+        if not name:
+            return
+        reply = QMessageBox.question(
+            self, "Delete Profile",
+            f"Delete profile '{name}'? This will also reset all core offsets to 0.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        if not file_path:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         try:
-            output = run_privileged(["apply-file", file_path])
-            self.output.setText(output)  # Output already includes new offsets
+            profiles_dir = "/etc/ruv/profiles"
+            json_path = f"{profiles_dir}/{name}.json"
+            # Single pkexec call: remove file and reset offsets via the script
+            cmd = [
+                "pkexec", "bash", "-c",
+                f"rm -f {json_path} && {sys.executable} {SCRIPT_PATH} -- reset"
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+            self.output.setText(f"Profile '{name}' deleted and all offsets reset to 0.\n{result.stdout}")
+            self.refresh_profile_list()
         except Exception as e:
-            self.output.setText(f"Error loading offsets: {str(e)}")
+            self.output.setText(f"Error deleting profile: {e}")
+
+    def apply_profile(self):
+        """Apply the offsets from the selected profile."""
+        name = self.profile_combo.currentText()
+        if not name:
+            self.output.setText("No profile selected.")
+            return
+        try:
+            profiles_dir = Path("/etc/ruv/profiles")
+            json_path = profiles_dir / f"{name}.json"
+            if not json_path.exists():
+                self.output.setText(f"Profile file {json_path} not found.")
+                return
+            output = run_privileged(["apply-file", str(json_path)])
+            self.output.setText(output)
+        except Exception as e:
+            self.output.setText(f"Error applying profile: {e}")
+
+    def update_profile_with_offset(self):
+        """Update the selected profile: set all core offsets to the current spinbox value.
+        Only one password prompt (reads and writes in a single pkexec call)."""
+        name = self.profile_combo.currentText()
+        if not name:
+            self.output.setText("No profile selected.")
+            return
+        profiles_dir = "/etc/ruv/profiles"
+        json_path = f"{profiles_dir}/{name}.json"
+        # Check existence without pkexec first (the file is world-readable)
+        if not os.path.exists(json_path):
+            self.output.setText(f"Profile '{name}' does not exist (file missing).")
+            return
+
+        new_offset = self.offset_spin.value()
+        # Warn if offset is far outside typical range
+        if new_offset < -30 or new_offset > 30:
+            reply = QMessageBox.warning(
+                self,
+                "Offset Warning",
+                f"Offset {new_offset} mV is outside the typical ±30 mV range.\n"
+                "Continue updating profile?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # Single pkexec call: read JSON, modify all values, write back
+        # Use a short Python script embedded in bash -c
+        python_script = f'''
+import json, sys
+with open("{json_path}", "r") as f:
+    data = json.load(f)
+for core in data:
+    data[core] = {new_offset}
+with open("{json_path}", "w") as f:
+    json.dump(data, f, indent=2)
+'''
+        # Escape the script for passing via bash -c
+        escaped_script = python_script.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+        cmd = ["pkexec", "bash", "-c", f"python3 -c \"{escaped_script}\""]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+            self.output.setText(f"Profile '{name}' updated: all cores set to {new_offset} mV.\n"
+                                f"Use 'Apply Profile' to load these offsets live.")
+        except Exception as e:
+            self.output.setText(f"Error updating profile: {e}")
+
+    def set_as_boot_profile(self):
+        """Install/update systemd service using the selected profile – one password prompt."""
+        name = self.profile_combo.currentText()
+        if not name:
+            self.output.setText("No profile selected.")
+            return
+        profiles_dir = Path("/etc/ruv/profiles")
+        json_path = profiles_dir / f"{name}.json"
+        if not json_path.exists():
+            self.output.setText(f"Profile '{name}' does not exist (file missing).")
+            return
+
+        service_content = f"""[Unit]
+Description=Apply Ryzen undervolt profile '{name}'
+After=multi-user.target
+After=ryzen_smu.service
+Wants=ryzen_smu.service
+
+[Service]
+Type=oneshot
+ExecStart={sys.executable} {SCRIPT_PATH} apply-file {json_path}
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+"""
+        service_path = "/etc/systemd/system/ruv-boot.service"
+
+        # Write service content to a temporary file, then copy it with pkexec
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as tf:
+                tf.write(service_content)
+                temp_path = tf.name
+
+            # Single pkexec call: copy file, daemon-reload, enable service
+            cmd = [
+                "pkexec", "bash", "-c",
+                f"cp {temp_path} {service_path} && systemctl daemon-reload && systemctl enable ruv-boot.service && rm {temp_path}"
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            self.output.setText(
+                f"Boot service installed with profile '{name}'.\n"
+                f"Profile will be applied automatically at next boot.\n"
+                f"To remove the service, use 'Remove Boot Service' button."
+            )
+        except subprocess.CalledProcessError as e:
+            self.output.setText(f"Error installing boot service: {e.stderr if e.stderr else str(e)}")
+        except Exception as e:
+            self.output.setText(f"Error installing boot service: {e}")
+        finally:
+            # Clean up temp file (in case it wasn't removed by the shell command)
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def remove_boot_service(self):
+        """Disable and remove the systemd service – one password prompt."""
+        reply = QMessageBox.question(
+            self, "Remove Boot Service",
+            "Remove the boot service? This will stop automatic offset loading at startup.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            cmd = [
+                "pkexec", "bash", "-c",
+                "systemctl disable ruv-boot.service && rm -f /etc/systemd/system/ruv-boot.service && systemctl daemon-reload"
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            self.output.setText("Boot service removed successfully.")
+        except subprocess.CalledProcessError as e:
+            self.output.setText(f"Error removing boot service: {e.stderr if e.stderr else str(e)}")
+        except Exception as e:
+            self.output.setText(f"Error removing boot service: {e}")
 
 
 if __name__ == "__main__":
-    # Prevent running GUI as root
     if len(sys.argv) == 1 and os.geteuid() == 0:
         print("ERROR: Do not run the GUI as root.", file=sys.stderr)
         sys.exit(1)
 
     if len(sys.argv) > 1:
-        # Strip the '--' marker used by run_privileged
         if sys.argv[1] == "--" and len(sys.argv) > 2:
             sys.argv = [sys.argv[0]] + sys.argv[2:]
         cli_mode()
