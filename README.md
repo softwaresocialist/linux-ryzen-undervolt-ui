@@ -1,5 +1,5 @@
 # Linux Ryzen undervolt UI
-This is still in early development. EXPECT BUGS
+This is still in early development. EXPECT BUGS. AI helped me code
 # What is it ?
 This is a linux implementation of the PBO2 undervolting tool with a gui and cli.
 # How to use it ?
