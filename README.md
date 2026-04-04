@@ -1,7 +1,7 @@
 # Linux Ryzen undervolt UI
-This is still in early development. EXPECT BUGS. AI helped me code
+This is still in early development. EXPECT BUGS. AI helped me write the code.
 # What is it ?
-This is a linux implementation of the PBO2 undervolting tool with a gui and cli.
+This is a linux implementation of the PBO2 undervolting tool with a gui.
 # How to use it ?
 1. Clone this repository: https://github.com/amkillam/ryzen_smu and install the Ryzen SMU driver that makes comunication with Ryzen SMU (System Management Unit) possible
 ```pwsh
