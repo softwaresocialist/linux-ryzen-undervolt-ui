@@ -18,5 +18,7 @@ Now make a reboot. The dkms-install should make a new module into you system cal
 git clone https://github.com/softwaresocialist/linux-ryzen-undervolt-ui.git
 cd linux-ryzen-undervolt-ui
 python3 ruv_gui.py
+```
 
 
+<img width="807" height="529" alt="Bildschirmfoto_20260404_140831" src="https://github.com/user-attachments/assets/93a5a128-c5aa-45fd-9671-95775fb269a8" />
