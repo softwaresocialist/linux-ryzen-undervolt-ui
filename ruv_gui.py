@@ -16,6 +16,7 @@ import argparse
 import json
 import shutil
 import tempfile
+import re
 from pathlib import Path
 from typing import List
 
@@ -41,6 +42,11 @@ class RyzenSMU:
     CMD_RESET_ALL = 0x36
 
     SMU_TIMEOUT = 5.0
+
+    # Safe offset limits (mV). The typical usable range is ±30 mV,
+    # but we allow a slightly wider margin to accommodate possible future use.
+    MIN_OFFSET = -100
+    MAX_OFFSET = 100
 
     def __init__(self):
         if not self.driver_loaded():
@@ -159,6 +165,10 @@ class RyzenSMU:
         return value
 
     def set_core_offset(self, core_id: int, offset: int):
+        """Set voltage offset for a core (mV). Raises ValueError if offset out of allowed range."""
+        if not (self.MIN_OFFSET <= offset <= self.MAX_OFFSET):
+            raise ValueError(f"Offset {offset} mV is outside allowed range [{self.MIN_OFFSET}, {self.MAX_OFFSET}]")
+
         old_offset = self.get_core_offset(core_id)
 
         arg = (((core_id & 8) << 5 | (core_id & 7)) << 20) | (offset & 0xFFFF)
@@ -195,7 +205,9 @@ def get_physical_core_ids() -> List[int]:
                 pass
 
     if not core_ids:
-        return list(range(8))  # fallback
+        # Fallback: assume 8 cores, but warn the user
+        print("Warning: Could not read physical core IDs from sysfs. Falling back to 0..7.", file=sys.stderr)
+        return list(range(8))
 
     return sorted(core_ids)
 
@@ -227,7 +239,7 @@ def run_privileged(args: List[str]) -> str:
     return result.stdout
 
 
-def cli_mode():
+def cli_mode(cli_args: List[str]):
     parser = argparse.ArgumentParser(description="Ryzen SMU voltage control")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -251,7 +263,7 @@ def cli_mode():
 
     subparsers.add_parser("reset")
 
-    args = parser.parse_args()
+    args = parser.parse_args(cli_args)
 
     if not RyzenSMU.driver_loaded():
         print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
@@ -283,7 +295,15 @@ def cli_mode():
                 print(f"{core}: {smu.get_core_offset(core)}")
 
         elif args.command == "apply-file":
-            with open(args.file) as f:
+            file_path = Path(args.file).resolve()
+            profiles_dir = Path("/etc/ruv/profiles")
+            # Security: ensure the file is inside the profiles directory
+            try:
+                file_path.relative_to(profiles_dir)
+            except ValueError:
+                raise ValueError(f"Profile file {file_path} is not under {profiles_dir}")
+
+            with open(file_path) as f:
                 data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("JSON must be an object with core:offset pairs")
@@ -304,6 +324,9 @@ def cli_mode():
             smu.reset_all_offsets()
             print("OK: All offsets reset")
 
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -458,8 +481,9 @@ class MainWindow(QMainWindow):
         if not ok or not name.strip():
             return
         name = name.strip()
-        if "/" in name or ".." in name:
-            self.output.setText("Invalid profile name (cannot contain '/' or '..')")
+        # Strict allowlist: alphanumeric, underscore, hyphen, dot.
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', name):
+            self.output.setText("Invalid profile name. Use only letters, numbers, underscore, hyphen, and dot.")
             return
 
         profiles_dir = "/etc/ruv/profiles"
@@ -605,8 +629,8 @@ RemainAfterExit=no
 WantedBy=multi-user.target
 """
         service_path = "/etc/systemd/system/ruv-boot.service"
+        temp_path = None
 
-        # Write service content to a temporary file, then copy it with pkexec
         try:
             with tempfile.NamedTemporaryFile(mode='w', delete=False) as tf:
                 tf.write(service_content)
@@ -629,7 +653,7 @@ WantedBy=multi-user.target
             self.output.setText(f"Error installing boot service: {e}")
         finally:
             # Clean up temp file (in case it wasn't removed by the shell command)
-            if os.path.exists(temp_path):
+            if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
 
     def remove_boot_service(self):
@@ -659,10 +683,15 @@ if __name__ == "__main__":
         print("ERROR: Do not run the GUI as root.", file=sys.stderr)
         sys.exit(1)
 
+    # If we have extra arguments, treat them as CLI mode.
+    # We extract the arguments after the script name, without mutating sys.argv globally.
     if len(sys.argv) > 1:
+        # If the first argument is "--", skip it (used by run_privileged)
         if sys.argv[1] == "--" and len(sys.argv) > 2:
-            sys.argv = [sys.argv[0]] + sys.argv[2:]
-        cli_mode()
+            cli_args = sys.argv[2:]
+        else:
+            cli_args = sys.argv[1:]
+        cli_mode(cli_args)
     else:
         app = QApplication(sys.argv)
         window = MainWindow()
