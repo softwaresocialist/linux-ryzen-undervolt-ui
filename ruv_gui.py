@@ -26,8 +26,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton,
     QTextEdit, QVBoxLayout, QHBoxLayout,
     QWidget, QLabel, QSpinBox, QMessageBox,
-    QComboBox, QInputDialog
+    QComboBox, QInputDialog, QListWidget,
+    QListWidgetItem, QAbstractItemView
 )
+from PyQt6.QtCore import Qt
 
 
 class RyzenSMU:
@@ -332,84 +334,108 @@ def cli_mode(cli_args: List[str]):
         sys.exit(1)
 
 
+class CoreSelectionList(QListWidget):
+    """Simple QListWidget with checkboxes for core selection."""
+    def __init__(self, core_ids: List[int], parent=None):
+        super().__init__(parent)
+        self.core_ids = core_ids
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for core in core_ids:
+            item = QListWidgetItem(f"Core {core}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)  # all cores ticked by default
+            self.addItem(item)
+            item.setData(Qt.ItemDataRole.UserRole, core)
+
+    def get_selected_cores(self) -> List[int]:
+        cores = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                cores.append(item.data(Qt.ItemDataRole.UserRole))
+        return cores
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
         self.setWindowTitle("Linux Undervolt Tool")
-        self.resize(600, 500)
+        self.resize(700, 550)  # Slightly wider for longer button text
 
         self.core_ids = get_physical_core_ids()
         if not self.core_ids:
             self.core_ids = list(range(8))
 
-        self.max_cores = len(self.core_ids)
-
         central = QWidget()
         self.setCentralWidget(central)
 
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(5)
         central.setLayout(main_layout)
 
-        # Offset input and core count selector (all left-aligned, button on right)
-        controls_layout = QHBoxLayout()
-        controls_layout.addWidget(QLabel("Offset (mV):"))
-
+        # Row 1: Offset + Apply button
+        row1 = QHBoxLayout()
+        row1.setSpacing(10)
+        row1.addWidget(QLabel("Offset (mV):"))
         self.offset_spin = QSpinBox()
         self.offset_spin.setRange(-32768, 32767)
         self.offset_spin.setValue(0)
-        controls_layout.addWidget(self.offset_spin)
+        row1.addWidget(self.offset_spin)
+        row1.addStretch()
+        self.btn_apply = QPushButton("Apply to Selected Cores")
+        row1.addWidget(self.btn_apply)
+        main_layout.addLayout(row1)
 
-        controls_layout.addWidget(QLabel("Number of cores:"))
+        # Row 2: Core selection list (all cores ticked by default, no scroll needed)
+        main_layout.addWidget(QLabel("Select cores to undervolt:"))
+        self.core_list = CoreSelectionList(self.core_ids)
+        # No setMaximumHeight - let it expand to show all cores
+        main_layout.addWidget(self.core_list)
 
-        self.core_spin = QSpinBox()
-        self.core_spin.setRange(1, self.max_cores)
-        self.core_spin.setValue(self.max_cores)
-        controls_layout.addWidget(self.core_spin)
-
-        controls_layout.addStretch()  # pushes button to right
-        self.btn_apply = QPushButton("Apply Offset")
-        controls_layout.addWidget(self.btn_apply)
-        main_layout.addLayout(controls_layout)
-
-        # Action buttons
-        button_row = QHBoxLayout()
+        # Row 3: Show offsets and Reset buttons
+        row3 = QHBoxLayout()
+        row3.setSpacing(10)
         self.btn_list = QPushButton("Show Current Offsets")
         self.btn_reset = QPushButton("Reset All Offsets")
-        button_row.addWidget(self.btn_list)
-        button_row.addWidget(self.btn_reset)
-        main_layout.addLayout(button_row)
+        row3.addWidget(self.btn_list)
+        row3.addWidget(self.btn_reset)
+        row3.addStretch()
+        main_layout.addLayout(row3)
 
-        # Profile management
-        profile_layout = QHBoxLayout()
-        profile_layout.addWidget(QLabel("Profile:"))
-
+        # Row 4: Profile management (full labels, may wrap on small screens)
+        row4 = QHBoxLayout()
+        row4.setSpacing(5)
+        row4.addWidget(QLabel("Profile:"))
         self.profile_combo = QComboBox()
-        self.profile_combo.setMinimumWidth(200)
-        profile_layout.addWidget(self.profile_combo)
-
+        self.profile_combo.setMinimumWidth(150)
+        row4.addWidget(self.profile_combo)
         self.btn_save_profile = QPushButton("Save Current as Profile")
         self.btn_delete_profile = QPushButton("Delete Profile")
         self.btn_apply_profile = QPushButton("Apply Profile")
         self.btn_update_profile = QPushButton("Update Profile with Offset")
-        profile_layout.addWidget(self.btn_save_profile)
-        profile_layout.addWidget(self.btn_delete_profile)
-        profile_layout.addWidget(self.btn_apply_profile)
-        profile_layout.addWidget(self.btn_update_profile)
-        main_layout.addLayout(profile_layout)
+        row4.addWidget(self.btn_save_profile)
+        row4.addWidget(self.btn_delete_profile)
+        row4.addWidget(self.btn_apply_profile)
+        row4.addWidget(self.btn_update_profile)
+        row4.addStretch()
+        main_layout.addLayout(row4)
 
-        # Boot service management
-        boot_layout = QHBoxLayout()
+        # Row 5: Boot service management
+        row5 = QHBoxLayout()
+        row5.setSpacing(10)
         self.btn_set_boot = QPushButton("Set as Boot Profile")
         self.btn_remove_boot = QPushButton("Remove Boot Service")
-        boot_layout.addWidget(self.btn_set_boot)
-        boot_layout.addWidget(self.btn_remove_boot)
-        boot_layout.addStretch()
-        main_layout.addLayout(boot_layout)
+        row5.addWidget(self.btn_set_boot)
+        row5.addWidget(self.btn_remove_boot)
+        row5.addStretch()
+        main_layout.addLayout(row5)
 
-        # Output text area
+        # Row 6: Output area (smaller)
         self.output = QTextEdit()
         self.output.setReadOnly(True)
+        self.output.setMaximumHeight(150)
         main_layout.addWidget(self.output)
 
         # Connect signals
@@ -423,7 +449,6 @@ class MainWindow(QMainWindow):
         self.btn_set_boot.clicked.connect(self.set_as_boot_profile)
         self.btn_remove_boot.clicked.connect(self.remove_boot_service)
 
-        # Initialise profile list
         self.refresh_profile_list()
 
     def list_offsets(self):
@@ -441,8 +466,12 @@ class MainWindow(QMainWindow):
             self.output.setText(str(e))
 
     def apply_offset(self):
+        selected_cores = self.core_list.get_selected_cores()
+        if not selected_cores:
+            self.output.setText("No cores selected. Please tick at least one core.")
+            return
+
         offset = self.offset_spin.value()
-        num_cores = self.core_spin.value()
 
         if offset < -30 or offset > 30:
             reply = QMessageBox.warning(
@@ -457,7 +486,6 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        selected_cores = self.core_ids[:num_cores]
         try:
             output = run_privileged(["apply-list"] + [str(c) for c in selected_cores] + [str(offset)])
             self.output.setText(output)
@@ -465,7 +493,6 @@ class MainWindow(QMainWindow):
             self.output.setText(f"Error applying: {str(e)}")
 
     def refresh_profile_list(self):
-        """Scan /etc/ruv/profiles/ and update the combo box."""
         profiles_dir = Path("/etc/ruv/profiles")
         self.profile_combo.clear()
         try:
@@ -476,12 +503,10 @@ class MainWindow(QMainWindow):
             self.output.append(f"Error scanning profiles: {e}")
 
     def save_current_as_profile(self):
-        """Save current offsets as a new profile – only one password prompt."""
         name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:")
         if not ok or not name.strip():
             return
         name = name.strip()
-        # Strict allowlist: alphanumeric, underscore, hyphen, dot.
         if not re.match(r'^[a-zA-Z0-9_.-]+$', name):
             self.output.setText("Invalid profile name. Use only letters, numbers, underscore, hyphen, and dot.")
             return
@@ -489,7 +514,6 @@ class MainWindow(QMainWindow):
         profiles_dir = "/etc/ruv/profiles"
         json_path = f"{profiles_dir}/{name}.json"
 
-        # Single pkexec call: create directory and write offsets JSON
         cmd = [
             "pkexec", "bash", "-c",
             f"mkdir -p {profiles_dir} && {sys.executable} {SCRIPT_PATH} -- list --json > {json_path}"
@@ -507,7 +531,6 @@ class MainWindow(QMainWindow):
             self.output.setText(f"Error saving profile: {e}")
 
     def delete_profile(self):
-        """Delete the selected profile and reset all offsets to 0 – one password prompt."""
         name = self.profile_combo.currentText()
         if not name:
             return
@@ -521,7 +544,6 @@ class MainWindow(QMainWindow):
         try:
             profiles_dir = "/etc/ruv/profiles"
             json_path = f"{profiles_dir}/{name}.json"
-            # Single pkexec call: remove file and reset offsets via the script
             cmd = [
                 "pkexec", "bash", "-c",
                 f"rm -f {json_path} && {sys.executable} {SCRIPT_PATH} -- reset"
@@ -535,7 +557,6 @@ class MainWindow(QMainWindow):
             self.output.setText(f"Error deleting profile: {e}")
 
     def apply_profile(self):
-        """Apply the offsets from the selected profile."""
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
@@ -552,21 +573,17 @@ class MainWindow(QMainWindow):
             self.output.setText(f"Error applying profile: {e}")
 
     def update_profile_with_offset(self):
-        """Update the selected profile: set all core offsets to the current spinbox value.
-        Only one password prompt (reads and writes in a single pkexec call)."""
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
             return
         profiles_dir = "/etc/ruv/profiles"
         json_path = f"{profiles_dir}/{name}.json"
-        # Check existence without pkexec first (the file is world-readable)
         if not os.path.exists(json_path):
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
 
         new_offset = self.offset_spin.value()
-        # Warn if offset is far outside typical range
         if new_offset < -30 or new_offset > 30:
             reply = QMessageBox.warning(
                 self,
@@ -579,8 +596,6 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        # Single pkexec call: read JSON, modify all values, write back
-        # Use a short Python script embedded in bash -c
         python_script = f'''
 import json, sys
 with open("{json_path}", "r") as f:
@@ -590,7 +605,6 @@ for core in data:
 with open("{json_path}", "w") as f:
     json.dump(data, f, indent=2)
 '''
-        # Escape the script for passing via bash -c
         escaped_script = python_script.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
         cmd = ["pkexec", "bash", "-c", f"python3 -c \"{escaped_script}\""]
         try:
@@ -603,7 +617,6 @@ with open("{json_path}", "w") as f:
             self.output.setText(f"Error updating profile: {e}")
 
     def set_as_boot_profile(self):
-        """Install/update systemd service using the selected profile – one password prompt."""
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
@@ -622,7 +635,7 @@ Wants=ryzen_smu.service
 
 [Service]
 Type=oneshot
-ExecStart={sys.executable} {SCRIPT_PATH} apply-file {json_path}
+ExecStart={sys.executable} {SCRIPT_PATH} -- apply-file {json_path}
 RemainAfterExit=no
 
 [Install]
@@ -636,7 +649,6 @@ WantedBy=multi-user.target
                 tf.write(service_content)
                 temp_path = tf.name
 
-            # Single pkexec call: copy file, daemon-reload, enable service
             cmd = [
                 "pkexec", "bash", "-c",
                 f"cp {temp_path} {service_path} && systemctl daemon-reload && systemctl enable ruv-boot.service && rm {temp_path}"
@@ -652,12 +664,10 @@ WantedBy=multi-user.target
         except Exception as e:
             self.output.setText(f"Error installing boot service: {e}")
         finally:
-            # Clean up temp file (in case it wasn't removed by the shell command)
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
 
     def remove_boot_service(self):
-        """Disable and remove the systemd service – one password prompt."""
         reply = QMessageBox.question(
             self, "Remove Boot Service",
             "Remove the boot service? This will stop automatic offset loading at startup.",
@@ -683,10 +693,7 @@ if __name__ == "__main__":
         print("ERROR: Do not run the GUI as root.", file=sys.stderr)
         sys.exit(1)
 
-    # If we have extra arguments, treat them as CLI mode.
-    # We extract the arguments after the script name, without mutating sys.argv globally.
     if len(sys.argv) > 1:
-        # If the first argument is "--", skip it (used by run_privileged)
         if sys.argv[1] == "--" and len(sys.argv) > 2:
             cli_args = sys.argv[2:]
         else:
