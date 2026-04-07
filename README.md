@@ -22,7 +22,7 @@ git clone https://github.com/amkillam/ryzen_smu.git
 cd ryzen_smu
 sudo make dkms-install
 reboot
-
+```
 2. Install the GUI tool
 bash
 
@@ -34,12 +34,14 @@ The installer copies the script to /usr/local/bin/ruv-gui, adds a desktop file a
 3. Run the GUI
 
 From the application menu: "Ryzen Undervolt Tool"
-Or terminal: ruv-gui
+Or terminal: 
+```bash
+ruv-gui
+```
 Uninstall
-bash
-
+```bash
 sudo ./uninstall.sh
-
+```
 Usage
 
     Set an offset in mV (e.g., -15)
