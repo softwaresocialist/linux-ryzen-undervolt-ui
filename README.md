@@ -29,8 +29,6 @@ git clone https://github.com/softwaresocialist/linux-ryzen-undervolt-ui.git
 cd linux-ryzen-undervolt-ui
 sudo ./install.sh
 ```
-The installer copies the script to /usr/local/bin/ruv-gui, adds a desktop file and icon, installs a Polkit policy (password once per session), and creates /etc/ruv/profiles.
-
 ## 3. Run the GUI
 
 From the application menu: "Ryzen Undervolt Tool"
