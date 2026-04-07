@@ -43,14 +43,3 @@ Uninstall
 ```bash
 sudo ./uninstall.sh
 ```
-Usage
-
-    Set an offset in mV (e.g., -15)
-
-    Select cores
-
-    Click "Apply to Selected Cores"
-
-    Use profiles to save/load settings
-
-    "Set as Boot Profile" creates a systemd service to apply at startup
