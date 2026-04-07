@@ -39,7 +39,7 @@ Or terminal:
 ```bash
 ruv-gui
 ```
-Uninstall
+## Uninstall
 ```bash
 sudo ./uninstall.sh
 ```
