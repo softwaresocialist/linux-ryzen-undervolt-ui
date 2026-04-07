@@ -28,10 +28,6 @@ if [ -f "$SCRIPT_DIR/ruv-gui.svg" ]; then
     gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 
-# 3. Polkit policy (allows ruv-gui to run privileged commands)
-echo "Installing Polkit policy..."
-install -Dm 644 "$SCRIPT_DIR/com.softwaresocialist.ruv.policy" /usr/share/polkit-1/actions/com.softwaresocialist.ruv.policy
-
 # 4. Create profiles directory
 mkdir -p /etc/ruv/profiles
 chmod 755 /etc/ruv/profiles
