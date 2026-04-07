@@ -16,11 +16,11 @@ command -v pkexec >/dev/null 2>&1 || { echo "pkexec (polkit) is required. Instal
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 1. Install main script
+# Install main script
 echo "Installing ruv-gui script..."
 install -Dm 755 "$SCRIPT_DIR/ruv_gui.py" /usr/local/bin/ruv-gui
 
-# 2. Desktop integration
+# Desktop integration
 echo "Installing desktop file and icon..."
 install -Dm 644 "$SCRIPT_DIR/ruv-gui.desktop" /usr/share/applications/ruv-gui.desktop
 if [ -f "$SCRIPT_DIR/ruv-gui.svg" ]; then
@@ -28,12 +28,4 @@ if [ -f "$SCRIPT_DIR/ruv-gui.svg" ]; then
     gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 
-# 4. Create profiles directory
-mkdir -p /etc/ruv/profiles
-chmod 755 /etc/ruv/profiles
-
 echo "Installation complete!"
-echo ""
-echo "You can now run 'ruv-gui' from your application menu or terminal."
-echo "IMPORTANT: This tool requires the 'ryzen_smu' kernel driver to be installed separately."
-echo "See: https://github.com/leogx9r/ryzen_smu"
