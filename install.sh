@@ -24,7 +24,7 @@ install -Dm 755 "$SCRIPT_DIR/ruv_gui.py" /usr/local/bin/ruv-gui
 echo "Installing desktop file and icon..."
 install -Dm 644 "$SCRIPT_DIR/ruv-gui.desktop" /usr/share/applications/ruv-gui.desktop
 if [ -f "$SCRIPT_DIR/ruv-gui.svg" ]; then
-    install -Dm 644 "$SCRIPT_DIR/ruv-gui.svg" /usr/share/icons/hicolor/scalable/apps/ruv-gui.svg
+    install -Dm 644 "$SCRIPT_DIR/ruv-gui.png" /usr/share/icons/hicolor/scalable/apps/ruv-gui.svg
     gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 
