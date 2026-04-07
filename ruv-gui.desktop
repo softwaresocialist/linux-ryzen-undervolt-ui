@@ -6,5 +6,5 @@ Exec=/usr/local/bin/ruv-gui
 Icon=ruv-gui
 Terminal=false
 Categories=System;Utility;
-Keywords=ryzen;undervolt;cpu;performance;
+Keywords=ryzen;undervolt;cpu;performance;PBO2;ryzen;AMD;
 StartupNotify=true
