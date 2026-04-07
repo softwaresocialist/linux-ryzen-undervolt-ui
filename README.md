@@ -17,12 +17,8 @@ A Linux GUI to set per‑core voltage offsets (undervolt) for Ryzen CPUs via the
 
 ### 1. Install the ryzen_smu driver
 
-```bash
-git clone https://github.com/amkillam/ryzen_smu.git
-cd ryzen_smu
-sudo make dkms-install
-reboot
-```
+https://github.com/amkillam/ryzen_smu
+
 ## 2. Install the GUI tool
 ```bash
 git clone https://github.com/softwaresocialist/linux-ryzen-undervolt-ui.git
