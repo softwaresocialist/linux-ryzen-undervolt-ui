@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Ryzen Undervolt Tool
+Comment=Set voltage offsets for Ryzen CPUs
+Exec=ruv_gui
+Icon=ruv_gui
+Type=Application
+Categories=System;
