@@ -9,8 +9,7 @@ fi
 echo "Removing ruv-gui..."
 rm -f /usr/local/bin/ruv-gui
 rm -f /usr/share/applications/ruv-gui.desktop
-rm -f /usr/share/icons/hicolor/scalable/apps/ruv-gui.svg
-rm -f /usr/share/polkit-1/actions/com.softwaresocialist.ruv.policy
+rm -f /usr/share/icons/hicolor/scalable/apps/ruv-gui.png
 
 # Optionally remove profiles
 read -p "Remove all saved profiles in /etc/ruv/profiles? (y/N) " -n 1 -r
