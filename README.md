@@ -9,9 +9,9 @@ A Linux GUI to set per‑core voltage offsets (undervolt) for Ryzen CPUs via the
 ## Prerequisites
 
 - Ryzen CPU (3000 series or newer)
-- Python 3.8+ with PyQt6 installed (`pip install PyQt6`)
-- polkit (`pkexec`) – usually preinstalled
-- The `ryzen_smu` kernel driver (install separately, see step 1)
+- Python 3.8+ with PyQt6 installed
+- polkit (`pkexec`)
+- The `ryzen_smu` kernel driver
 
 ## Installation
 
