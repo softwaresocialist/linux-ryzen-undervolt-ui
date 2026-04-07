@@ -23,6 +23,7 @@ https://github.com/amkillam/ryzen_smu
 ```bash
 git clone https://github.com/softwaresocialist/linux-ryzen-undervolt-ui.git
 cd linux-ryzen-undervolt-ui
+chmod +x install.sh
 sudo ./install.sh
 ```
 ## 3. Run the GUI
