@@ -1,20 +1,53 @@
-# Linux Ryzen undervolt UI
-This is still in early development. EXPECT BUGS. AI helped me write the code.
-# What is it ?
-This is a linux implementation of the PBO2 undervolting tool with a gui.
-# How to use it ?
-1. Clone this repository: https://github.com/amkillam/ryzen_smu and install the Ryzen SMU driver that makes comunication with Ryzen SMU (System Management Unit) possible
-```pwsh
+# Linux Ryzen Undervolt UI
+
+Early development – expect bugs. AI‑assisted code.
+
+## What is it?
+
+A Linux GUI to set per‑core voltage offsets (undervolt) for Ryzen CPUs via the `ryzen_smu` kernel driver.
+
+## Prerequisites
+
+- Ryzen CPU (3000 series or newer)
+- Python 3.8+ with PyQt6 installed (`pip install PyQt6`)
+- polkit (`pkexec`) – usually preinstalled
+- The `ryzen_smu` kernel driver (install separately, see step 1)
+
+## Installation
+
+### 1. Install the ryzen_smu driver
+
+```bash
 git clone https://github.com/amkillam/ryzen_smu.git
 cd ryzen_smu
 sudo make dkms-install
-```
-Now make a reboot. The dkms-install should make a new module into you system called "ryzen_smu". It will autostart next time you reboot your system. Without it the provided Python script will not function.
+reboot
 
-2. Clone and run the python file
-```pwsh
+2. Install the GUI tool
+bash
+
 git clone https://github.com/softwaresocialist/linux-ryzen-undervolt-ui.git
 cd linux-ryzen-undervolt-ui
-python3 ruv_gui.py
-```
+sudo ./install.sh
 
+The installer copies the script to /usr/local/bin/ruv-gui, adds a desktop file and icon, installs a Polkit policy (password once per session), and creates /etc/ruv/profiles.
+3. Run the GUI
+
+From the application menu: "Ryzen Undervolt Tool"
+Or terminal: ruv-gui
+Uninstall
+bash
+
+sudo ./uninstall.sh
+
+Usage
+
+    Set an offset in mV (e.g., -15)
+
+    Select cores
+
+    Click "Apply to Selected Cores"
+
+    Use profiles to save/load settings
+
+    "Set as Boot Profile" creates a systemd service to apply at startup
