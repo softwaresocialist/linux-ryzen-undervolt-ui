@@ -2,7 +2,7 @@
 set -e
 
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root (use sudo)." 
+   echo "This script must be run as root (use sudo)."
    exit 1
 fi
 
@@ -21,8 +21,10 @@ install -Dm 755 "$SCRIPT_DIR/ruv_gui.py" /usr/local/bin/ruv-gui
 # Desktop integration
 echo "Installing desktop file and icon..."
 install -Dm 644 "$SCRIPT_DIR/ruv-gui.desktop" /usr/share/applications/ruv-gui.desktop
-if [ -f "$SCRIPT_DIR/ruv-gui.svg" ]; then
-    install -Dm 644 "$SCRIPT_DIR/ruv-gui.png" /usr/share/icons/hicolor/scalable/apps/ruv-gui.svg
+
+# Install PNG icon only (no fallback)
+if [ -f "$SCRIPT_DIR/ruv-gui.png" ]; then
+    install -Dm 644 "$SCRIPT_DIR/ruv-gui.png" /usr/share/icons/hicolor/256x256/apps/ruv-gui.png
     gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 
