@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QAbstractItemView
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
 
 
 class RyzenSMU:
@@ -363,6 +364,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Linux Undervolt Tool")
         self.resize(700, 550)  # Slightly wider for longer button text
 
+        # Set the window icon (attempts theme first, then fallback to absolute path)
+        self._set_window_icon()
+
         self.core_ids = get_physical_core_ids()
         if not self.core_ids:
             self.core_ids = list(range(8))
@@ -450,6 +454,17 @@ class MainWindow(QMainWindow):
         self.btn_remove_boot.clicked.connect(self.remove_boot_service)
 
         self.refresh_profile_list()
+
+    def _set_window_icon(self):
+        """Set the window icon using the system theme with fallback to absolute path."""
+        icon = QIcon.fromTheme("ruv-gui")
+        if icon.isNull():
+            # Fallback to the installed location
+            fallback_path = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
+            if os.path.exists(fallback_path):
+                icon = QIcon(fallback_path)
+        if not icon.isNull():
+            self.setWindowIcon(icon)
 
     def list_offsets(self):
         try:
@@ -700,7 +715,22 @@ if __name__ == "__main__":
             cli_args = sys.argv[1:]
         cli_mode(cli_args)
     else:
+        # Set application metadata for proper WM_CLASS and icon integration
+        QApplication.setApplicationName("Linux Undervolt Tool")
+        QApplication.setApplicationDisplayName("Ryzen Undervolt Tool")
+        QApplication.setDesktopFileName("ruv-gui")  # Must match the .desktop file base name
+
         app = QApplication(sys.argv)
+
+        # Set a fallback application-wide window icon
+        app_icon = QIcon.fromTheme("ruv-gui")
+        if app_icon.isNull():
+            fallback_path = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
+            if os.path.exists(fallback_path):
+                app_icon = QIcon(fallback_path)
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
+
         window = MainWindow()
         window.show()
         sys.exit(app.exec())
