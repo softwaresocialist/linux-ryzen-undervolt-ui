@@ -35,5 +35,6 @@ ruv-gui
 ```
 ## Uninstall
 ```bash
+chmod +x uninstall.sh
 sudo ./uninstall.sh
 ```
