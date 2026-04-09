@@ -38,5 +38,7 @@ ruv-gui
 chmod +x uninstall.sh
 sudo ./uninstall.sh
 ```
+<img width="930" height="758" alt="Bildschirmfoto_20260409_170510" src="https://github.com/user-attachments/assets/6374d400-1896-41c0-ad30-fc7bdbf28e60" />
+
 
 
