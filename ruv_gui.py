@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Linux Undervolt Tool for Ryzen CPUs using the ryzen_smu kernel driver.
-Allows reading and setting voltage offsets per core.
-
-WARNING: This tool writes to the SMU (System Management Unit) of your Ryzen CPU.
-Incorrect offsets may cause system instability or damage. Use at your own risk.
-"""
 
 import sys
 import os
