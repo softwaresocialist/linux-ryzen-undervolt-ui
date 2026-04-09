@@ -53,7 +53,7 @@ class RyzenSMU:
 
     def __init__(self):
         if not self.driver_loaded():
-            raise RuntimeError("Ryzen SMU driver not loaded")
+            raise RuntimeError("Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu")
 
     @classmethod
     def driver_loaded(cls):
@@ -269,7 +269,7 @@ def cli_mode(cli_args: List[str]):
     args = parser.parse_args(cli_args)
 
     if not RyzenSMU.driver_loaded():
-        print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
+        print("Error: Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu", file=sys.stderr)
         sys.exit(1)
 
     smu = RyzenSMU()
@@ -299,7 +299,7 @@ def cli_mode(cli_args: List[str]):
 
         elif args.command == "apply-file":
             file_path = Path(args.file).resolve()
-            profiles_dir = Path("/etc/ruv/profiles")
+            profiles_dir = Path("/etc/ruv/profiles").resolve()
             # Security: ensure the file is inside the profiles directory
             try:
                 file_path.relative_to(profiles_dir)
@@ -361,8 +361,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Linux Undervolt Tool")
-        self.resize(700, 550)  # Slightly wider for longer button text
+        self.setWindowTitle("Ryzen Undervolt Tool")
+        self.resize(700, 550)
 
         # Set the window icon (attempts theme first, then fallback to absolute path)
         self._set_window_icon()
@@ -384,7 +384,8 @@ class MainWindow(QMainWindow):
         row1.setSpacing(10)
         row1.addWidget(QLabel("Offset (mV):"))
         self.offset_spin = QSpinBox()
-        self.offset_spin.setRange(-32768, 32767)
+        # Use the same limits as the driver
+        self.offset_spin.setRange(RyzenSMU.MIN_OFFSET, RyzenSMU.MAX_OFFSET)
         self.offset_spin.setValue(0)
         row1.addWidget(self.offset_spin)
         row1.addStretch()
@@ -392,10 +393,9 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.btn_apply)
         main_layout.addLayout(row1)
 
-        # Row 2: Core selection list (all cores ticked by default, no scroll needed)
+        # Row 2: Core selection list
         main_layout.addWidget(QLabel("Select cores to undervolt:"))
         self.core_list = CoreSelectionList(self.core_ids)
-        # No setMaximumHeight - let it expand to show all cores
         main_layout.addWidget(self.core_list)
 
         # Row 3: Show offsets and Reset buttons
@@ -408,7 +408,7 @@ class MainWindow(QMainWindow):
         row3.addStretch()
         main_layout.addLayout(row3)
 
-        # Row 4: Profile management (full labels, may wrap on small screens)
+        # Row 4: Profile management (with new Update Profile button)
         row4 = QHBoxLayout()
         row4.setSpacing(5)
         row4.addWidget(QLabel("Profile:"))
@@ -418,7 +418,7 @@ class MainWindow(QMainWindow):
         self.btn_save_profile = QPushButton("Save Current as Profile")
         self.btn_delete_profile = QPushButton("Delete Profile")
         self.btn_apply_profile = QPushButton("Apply Profile")
-        self.btn_update_profile = QPushButton("Update Profile with Offset")
+        self.btn_update_profile = QPushButton("Update Profile")   # <-- NEW BUTTON
         row4.addWidget(self.btn_save_profile)
         row4.addWidget(self.btn_delete_profile)
         row4.addWidget(self.btn_apply_profile)
@@ -436,7 +436,7 @@ class MainWindow(QMainWindow):
         row5.addStretch()
         main_layout.addLayout(row5)
 
-        # Row 6: Output area (smaller)
+        # Row 6: Output area
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         self.output.setMaximumHeight(150)
@@ -449,7 +449,7 @@ class MainWindow(QMainWindow):
         self.btn_save_profile.clicked.connect(self.save_current_as_profile)
         self.btn_delete_profile.clicked.connect(self.delete_profile)
         self.btn_apply_profile.clicked.connect(self.apply_profile)
-        self.btn_update_profile.clicked.connect(self.update_profile_with_offset)
+        self.btn_update_profile.clicked.connect(self.update_profile)   # <-- NEW CONNECTION
         self.btn_set_boot.clicked.connect(self.set_as_boot_profile)
         self.btn_remove_boot.clicked.connect(self.remove_boot_service)
 
@@ -459,7 +459,6 @@ class MainWindow(QMainWindow):
         """Set the window icon using the system theme with fallback to absolute path."""
         icon = QIcon.fromTheme("ruv-gui")
         if icon.isNull():
-            # Fallback to the installed location
             fallback_path = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
             if os.path.exists(fallback_path):
                 icon = QIcon(fallback_path)
@@ -587,18 +586,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.output.setText(f"Error applying profile: {e}")
 
-    def update_profile_with_offset(self):
+    def update_profile(self):
+        """Update the selected profile file: set every core's offset to the current spinbox value."""
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
             return
-        profiles_dir = "/etc/ruv/profiles"
-        json_path = f"{profiles_dir}/{name}.json"
-        if not os.path.exists(json_path):
-            self.output.setText(f"Profile '{name}' does not exist (file missing).")
-            return
 
         new_offset = self.offset_spin.value()
+
         if new_offset < -30 or new_offset > 30:
             reply = QMessageBox.warning(
                 self,
@@ -611,21 +607,35 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        python_script = f'''
-import json, sys
-with open("{json_path}", "r") as f:
-    data = json.load(f)
-for core in data:
-    data[core] = {new_offset}
-with open("{json_path}", "w") as f:
-    json.dump(data, f, indent=2)
-'''
-        escaped_script = python_script.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-        cmd = ["pkexec", "bash", "-c", f"python3 -c \"{escaped_script}\""]
+        profiles_dir = Path("/etc/ruv/profiles")
+        json_path = profiles_dir / f"{name}.json"
+        if not json_path.exists():
+            self.output.setText(f"Profile '{name}' does not exist (file missing).")
+            return
+
+        # Read the current profile, modify all core values to new_offset, write back
         try:
+            with open(json_path, "r") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Profile JSON is not a dictionary")
+
+            # Update every core's offset to new_offset
+            for core in data.keys():
+                data[core] = new_offset
+
+            # Write back using pkexec (since /etc/ruv is root-owned)
+            python_script = f'''
+import json
+with open("{json_path}", "w") as f:
+    json.dump({json.dumps(data)}, f, indent=2)
+'''
+            escaped_script = python_script.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+            cmd = ["pkexec", "bash", "-c", f"python3 -c \"{escaped_script}\""]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
+
             self.output.setText(f"Profile '{name}' updated: all cores set to {new_offset} mV.\n"
                                 f"Use 'Apply Profile' to load these offsets live.")
         except Exception as e:
@@ -642,11 +652,10 @@ with open("{json_path}", "w") as f:
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
 
+        # Fixed service file: no dependency on ryzen_smu.service
         service_content = f"""[Unit]
 Description=Apply Ryzen undervolt profile '{name}'
 After=multi-user.target
-After=ryzen_smu.service
-Wants=ryzen_smu.service
 
 [Service]
 Type=oneshot
@@ -715,14 +724,12 @@ if __name__ == "__main__":
             cli_args = sys.argv[1:]
         cli_mode(cli_args)
     else:
-        # Set application metadata for proper WM_CLASS and icon integration
-        QApplication.setApplicationName("Linux Undervolt Tool")
+        QApplication.setApplicationName("Ryzen Undervolt Tool")
         QApplication.setApplicationDisplayName("Ryzen Undervolt Tool")
-        QApplication.setDesktopFileName("ruv-gui")  # Must match the .desktop file base name
+        QApplication.setDesktopFileName("ruv-gui")
 
         app = QApplication(sys.argv)
 
-        # Set a fallback application-wide window icon
         app_icon = QIcon.fromTheme("ruv-gui")
         if app_icon.isNull():
             fallback_path = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
