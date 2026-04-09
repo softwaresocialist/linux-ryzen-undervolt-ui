@@ -12,6 +12,19 @@ command -v python3 >/dev/null 2>&1 || { echo "Python3 is required. Abort."; exit
 python3 -c "import PyQt6" 2>/dev/null || { echo "PyQt6 is not installed."; exit 1; }
 command -v pkexec >/dev/null 2>&1 || { echo "pkexec (polkit) is required."; exit 1; }
 
+# Check for ryzen_smu driver
+echo "Checking for ryzen_smu driver..."
+if [ ! -f "/sys/kernel/ryzen_smu_drv/version" ]; then
+    echo "WARNING: ryzen_smu driver is not loaded."
+    echo "The tool will not work until the driver is installed and loaded."
+    echo "Please install the driver from: https://github.com/amkillam/ryzen_smu"
+    echo "Then load it with: sudo modprobe ryzen_smu"
+    echo "Press Enter to continue installation anyway, or Ctrl+C to abort."
+    read -r
+else
+    echo "ryzen_smu driver detected."
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Install main script
