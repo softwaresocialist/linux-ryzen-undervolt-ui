@@ -11,7 +11,7 @@ import shutil
 import re
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.theme=false"
 
@@ -31,6 +31,33 @@ if os.environ.get("RUV_DEBUG"):
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 else:
     logging.basicConfig(level=logging.WARNING)
+
+
+def get_cpu_info() -> Tuple[Optional[int], Optional[int]]:
+    """Return (family, model) from /proc/cpuinfo."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            family = None
+            model = None
+            for line in f:
+                if line.startswith("cpu family"):
+                    family = int(line.split(":")[1].strip())
+                elif line.startswith("model"):
+                    model = int(line.split(":")[1].strip())
+                    if family is not None:
+                        return family, model
+    except Exception:
+        pass
+    return None, None
+
+
+def is_zen1_or_zenplus() -> bool:
+    """Return True if CPU is Zen 1 or Zen+ (family 23, model 1 or 8)."""
+    family, model = get_cpu_info()
+    if family == 23:  # Zen family (17h)
+        if model in (1, 8):  # Zen 1 (model 1), Zen+ (model 8)
+            return True
+    return False
 
 
 class RyzenSMU:
@@ -236,10 +263,36 @@ def cli_mode(cli_args: List[str]):
 
     subparsers.add_parser("reset")
 
+    # New command to read a profile file (used by GUI update)
+    read_profile_parser = subparsers.add_parser("read-profile")
+    read_profile_parser.add_argument("file", type=str, help="JSON file to read and output")
+
     args = parser.parse_args(cli_args)
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Warn for Zen 1 / Zen+ on any set operation
+    if is_zen1_or_zenplus() and args.command in ("set", "apply-list", "apply-file", "reset"):
+        print("Warning: Zen 1 / Zen+ CPUs may use different SMU commands. This tool is optimized for Zen 2 and newer.",
+              file=sys.stderr)
+
+    if args.command == "read-profile":
+        # This command just reads a file and prints its content; no SMU driver needed.
+        file_path = Path(args.file).resolve()
+        profiles_dir = Path("/etc/ruv/profiles").resolve()
+        try:
+            file_path.relative_to(profiles_dir)
+        except ValueError:
+            print(f"Error: Profile file {file_path} is not under {profiles_dir}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            with open(file_path, "r") as f:
+                print(f.read(), end="")
+        except Exception as e:
+            print(f"Error reading profile: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     if not RyzenSMU.driver_loaded():
         print("Error: Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu", file=sys.stderr)
@@ -455,6 +508,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_profile_list()
         self.refresh_offsets()  # Show current offsets on startup
+        self._check_cpu_support()  # Warn if unsupported CPU
 
     def _set_window_icon(self):
         icon = QIcon.fromTheme("ruv-gui")
@@ -464,6 +518,18 @@ class MainWindow(QMainWindow):
                 icon = QIcon(fallback_path)
         if not icon.isNull():
             self.setWindowIcon(icon)
+
+    def _check_cpu_support(self):
+        """Show a warning if running on Zen 1 / Zen+."""
+        if is_zen1_or_zenplus():
+            QMessageBox.warning(
+                self,
+                "CPU Compatibility Warning",
+                "Your CPU appears to be Zen 1 or Zen+.\n\n"
+                "This tool is optimized for Zen 2 and newer. "
+                "Voltage offset commands may not work correctly on this generation.\n\n"
+                "Proceed with caution."
+            )
 
     def list_offsets(self):
         try:
@@ -479,7 +545,6 @@ class MainWindow(QMainWindow):
         try:
             output = run_privileged(["reset"])
             self.output.setText(output)
-            # No need to refresh; reset output already indicates success
         except Exception as e:
             self.output.setText(str(e))
 
@@ -572,7 +637,6 @@ class MainWindow(QMainWindow):
                 raise RuntimeError(result.stderr.strip())
             self.output.setText(f"Profile '{name}' deleted and all offsets reset to 0.\n{result.stdout}")
             self.refresh_profile_list()
-            # No separate refresh needed
         except Exception as e:
             self.output.setText(f"Error deleting profile: {e}")
 
@@ -589,7 +653,6 @@ class MainWindow(QMainWindow):
                 return
             output = run_privileged(["apply-file", str(json_path)])
             self.output.setText(output)
-            # The output already contains the current offsets; no extra refresh needed.
         except Exception as e:
             self.output.setText(f"Error applying profile: {e}")
 
@@ -628,8 +691,12 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            with open(json_path, "r") as f:
-                profile_data = json.load(f)
+            # Read the profile file using the new CLI subcommand (runs as root)
+            raw_json = run_privileged(["read-profile", str(json_path)])
+            try:
+                profile_data = json.loads(raw_json)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in profile: {e}")
 
             if not isinstance(profile_data, dict):
                 raise ValueError("Profile JSON is not a dictionary")
@@ -638,11 +705,12 @@ class MainWindow(QMainWindow):
             for core in selected_cores:
                 profile_data[str(core)] = new_offset
 
+            # Write the modified JSON back using pkexec tee
             json_text = json.dumps(profile_data, indent=2)
-            cmd = ["pkexec", "tee", str(json_path)]
-            result = subprocess.run(cmd, input=json_text, text=True, capture_output=True)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.strip())
+            write_cmd = ["pkexec", "tee", str(json_path)]
+            write_result = subprocess.run(write_cmd, input=json_text, text=True, capture_output=True)
+            if write_result.returncode != 0:
+                raise RuntimeError(f"Failed to write profile: {write_result.stderr.strip()}")
 
             apply_reply = QMessageBox.question(
                 self, "Apply Updated Profile",
@@ -653,7 +721,6 @@ class MainWindow(QMainWindow):
             if apply_reply == QMessageBox.StandardButton.Yes:
                 apply_output = run_privileged(["apply-file", str(json_path)])
                 self.output.setText(f"Profile updated and applied.\n{apply_output}")
-                # apply_output already contains final offsets; no extra refresh
             else:
                 self.output.setText(f"Profile '{name}' updated (not applied live).")
             self.offset_spin.setValue(0)
