@@ -15,10 +15,10 @@ import time
 import argparse
 import json
 import shutil
-import tempfile
 import re
+import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.theme=false"
 
@@ -31,6 +31,13 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
+
+# Setup logging
+logger = logging.getLogger("ruv")
+if os.environ.get("RUV_DEBUG"):
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+else:
+    logging.basicConfig(level=logging.WARNING)
 
 
 class RyzenSMU:
@@ -153,8 +160,8 @@ class RyzenSMU:
                 try:
                     rollback_arg = (((core_id & 8) << 5 | (core_id & 7)) << 20) | (old_offset & 0xFFFF)
                     self.smu_command(self.CMD_SET_OFFSET, rollback_arg)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Rollback failed for core {core_id}: {e}")
             raise
 
     def reset_all_offsets(self):
@@ -162,6 +169,7 @@ class RyzenSMU:
 
 
 def get_physical_core_ids() -> List[int]:
+    """Return sorted list of physical core IDs present on the system."""
     cpu_path = Path("/sys/devices/system/cpu")
     core_ids = set()
     for cpu_dir in cpu_path.glob("cpu[0-9]*"):
@@ -172,16 +180,26 @@ def get_physical_core_ids() -> List[int]:
                     core_ids.add(int(f.read().strip()))
             except Exception:
                 pass
-    if not core_ids:
-        print("Warning: Could not read physical core IDs from sysfs. Falling back to 0..7.", file=sys.stderr)
+    if core_ids:
+        return sorted(core_ids)
+
+    # Fallback: try to use CPU affinity mask to guess number of cores
+    try:
+        affinity = os.sched_getaffinity(0)
+        max_logical = max(affinity) + 1
+        physical_cores = max_logical // 2
+        logger.warning("Using fallback core count: %d", physical_cores)
+        return list(range(physical_cores))
+    except Exception:
+        logger.warning("Could not read physical core IDs, falling back to 8 cores")
         return list(range(8))
-    return sorted(core_ids)
 
 
 SCRIPT_PATH = Path(__file__).resolve()
 
 
 def run_privileged(args: List[str]) -> str:
+    """Run the script with elevated privileges and return stdout."""
     if os.geteuid() != 0 and not shutil.which("pkexec"):
         raise RuntimeError("pkexec not found. Please install polkit or run this script as root.")
     if os.geteuid() == 0:
@@ -197,12 +215,13 @@ def run_privileged(args: List[str]) -> str:
             text=True
         )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip())
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
     return result.stdout
 
 
 def cli_mode(cli_args: List[str]):
     parser = argparse.ArgumentParser(description="Ryzen SMU voltage control")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list")
@@ -226,6 +245,9 @@ def cli_mode(cli_args: List[str]):
 
     args = parser.parse_args(cli_args)
 
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     if not RyzenSMU.driver_loaded():
         print("Error: Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu", file=sys.stderr)
         sys.exit(1)
@@ -242,11 +264,21 @@ def cli_mode(cli_args: List[str]):
                 for core in physical_cores:
                     print(f"{core}: {smu.get_core_offset(core)}")
         elif args.command == "get":
+            if args.core not in physical_cores:
+                print(f"Error: Core {args.core} does not exist", file=sys.stderr)
+                sys.exit(1)
             print(smu.get_core_offset(args.core))
         elif args.command == "set":
+            if args.core not in physical_cores:
+                print(f"Error: Core {args.core} does not exist", file=sys.stderr)
+                sys.exit(1)
             smu.set_core_offset(args.core, args.offset)
             print(f"OK: Core {args.core} set to {args.offset}")
         elif args.command == "apply-list":
+            invalid_cores = [c for c in args.cores if c not in physical_cores]
+            if invalid_cores:
+                print(f"Error: Cores {invalid_cores} do not exist", file=sys.stderr)
+                sys.exit(1)
             for core in args.cores:
                 smu.set_core_offset(core, args.offset)
             for core in args.cores:
@@ -262,12 +294,28 @@ def cli_mode(cli_args: List[str]):
                 data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("JSON must be an object with core:offset pairs")
+
+            failed = []
             for core_str, offset in data.items():
-                core = int(core_str)
-                if core not in physical_cores:
-                    print(f"Warning: Core {core} does not exist, skipping", file=sys.stderr)
+                try:
+                    core = int(core_str)
+                except ValueError:
+                    failed.append(f"{core_str}: invalid core ID")
                     continue
-                smu.set_core_offset(core, offset)
+                if core not in physical_cores:
+                    failed.append(f"{core}: core does not exist")
+                    continue
+                try:
+                    smu.set_core_offset(core, offset)
+                except Exception as e:
+                    failed.append(f"{core}: {e}")
+
+            if failed:
+                print("Errors applying offsets:", file=sys.stderr)
+                for err in failed:
+                    print(f"  {err}", file=sys.stderr)
+                sys.exit(1)
+
             print("OK: Offsets applied from file. Current offsets:")
             for core in physical_cores:
                 print(f"{core}: {smu.get_core_offset(core)}")
@@ -350,8 +398,12 @@ class MainWindow(QMainWindow):
 
         right_layout.addSpacing(20)
 
+        btn_row = QHBoxLayout()
         self.btn_list = QPushButton("Show Current Offsets")
-        right_layout.addWidget(self.btn_list)
+        self.btn_refresh = QPushButton("Refresh Offsets")
+        btn_row.addWidget(self.btn_list)
+        btn_row.addWidget(self.btn_refresh)
+        right_layout.addLayout(btn_row)
 
         self.btn_reset = QPushButton("Reset All Offsets")
         right_layout.addWidget(self.btn_reset)
@@ -396,7 +448,9 @@ class MainWindow(QMainWindow):
         self.output.setMaximumHeight(150)
         main_layout.addWidget(self.output)
 
+        # Connect signals
         self.btn_list.clicked.connect(self.list_offsets)
+        self.btn_refresh.clicked.connect(self.refresh_offsets)
         self.btn_reset.clicked.connect(self.reset_offsets)
         self.btn_apply.clicked.connect(self.apply_offset)
         self.btn_save_profile.clicked.connect(self.save_current_as_profile)
@@ -407,6 +461,7 @@ class MainWindow(QMainWindow):
         self.btn_remove_boot.clicked.connect(self.remove_boot_service)
 
         self.refresh_profile_list()
+        self.refresh_offsets()  # Show current offsets on startup
 
     def _set_window_icon(self):
         icon = QIcon.fromTheme("ruv-gui")
@@ -424,10 +479,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.output.setText(str(e))
 
+    def refresh_offsets(self):
+        self.list_offsets()  # Same operation
+
     def reset_offsets(self):
         try:
             output = run_privileged(["reset"])
             self.output.setText(output)
+            # No need to refresh; reset output already indicates success
         except Exception as e:
             self.output.setText(str(e))
 
@@ -451,6 +510,7 @@ class MainWindow(QMainWindow):
         try:
             output = run_privileged(["apply-list"] + [str(c) for c in selected_cores] + [str(offset)])
             self.output.setText(output)
+            self.offset_spin.setValue(0)  # Reset after successful apply
         except Exception as e:
             self.output.setText(f"Error applying: {str(e)}")
 
@@ -472,11 +532,15 @@ class MainWindow(QMainWindow):
         if not re.match(r'^[a-zA-Z0-9_.-]+$', name):
             self.output.setText("Invalid profile name. Use only letters, numbers, underscore, hyphen, and dot.")
             return
+
         profiles_dir = "/etc/ruv/profiles"
         json_path = f"{profiles_dir}/{name}.json"
+
+        script = str(SCRIPT_PATH)
+        python = sys.executable
         cmd = [
             "pkexec", "bash", "-c",
-            f"mkdir -p {profiles_dir} && {sys.executable} {SCRIPT_PATH} -- list --json > {json_path}"
+            f"mkdir -p {profiles_dir} && {python} {script} -- list --json > {json_path}"
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -504,15 +568,18 @@ class MainWindow(QMainWindow):
         try:
             profiles_dir = "/etc/ruv/profiles"
             json_path = f"{profiles_dir}/{name}.json"
+            script = str(SCRIPT_PATH)
+            python = sys.executable
             cmd = [
                 "pkexec", "bash", "-c",
-                f"rm -f {json_path} && {sys.executable} {SCRIPT_PATH} -- reset"
+                f"rm -f {json_path} && {python} {script} -- reset"
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
             self.output.setText(f"Profile '{name}' deleted and all offsets reset to 0.\n{result.stdout}")
             self.refresh_profile_list()
+            # No separate refresh needed
         except Exception as e:
             self.output.setText(f"Error deleting profile: {e}")
 
@@ -522,13 +589,14 @@ class MainWindow(QMainWindow):
             self.output.setText("No profile selected.")
             return
         try:
-            profiles_dir = Path("/etc/ruv/profiles")
+            profiles_dir = Path("/etc/ruv/profiles").resolve()
             json_path = profiles_dir / f"{name}.json"
             if not json_path.exists():
                 self.output.setText(f"Profile file {json_path} not found.")
                 return
             output = run_privileged(["apply-file", str(json_path)])
             self.output.setText(output)
+            # The output already contains the current offsets; no extra refresh needed.
         except Exception as e:
             self.output.setText(f"Error applying profile: {e}")
 
@@ -559,38 +627,30 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        profiles_dir = Path("/etc/ruv/profiles")
+        profiles_dir = Path("/etc/ruv/profiles").resolve()
         json_path = profiles_dir / f"{name}.json"
 
         if not json_path.exists():
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
 
-        temp_path = None
         try:
-            # Read the existing profile JSON
             with open(json_path, "r") as f:
                 profile_data = json.load(f)
 
             if not isinstance(profile_data, dict):
                 raise ValueError("Profile JSON is not a dictionary")
 
-            # Update only the selected cores
+            # Update selected cores
             for core in selected_cores:
                 profile_data[str(core)] = new_offset
 
-            # Write updated profile to a temporary file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tf:
-                json.dump(profile_data, tf, indent=2)
-                temp_path = tf.name
-
-            # Move the temp file into place with pkexec
-            cmd = ["pkexec", "mv", temp_path, str(json_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            json_text = json.dumps(profile_data, indent=2)
+            cmd = ["pkexec", "tee", str(json_path)]
+            result = subprocess.run(cmd, input=json_text, text=True, capture_output=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
 
-            # Optionally apply the updated profile live
             apply_reply = QMessageBox.question(
                 self, "Apply Updated Profile",
                 f"Profile '{name}' updated.\nDo you want to apply it to the CPU now?",
@@ -600,63 +660,55 @@ class MainWindow(QMainWindow):
             if apply_reply == QMessageBox.StandardButton.Yes:
                 apply_output = run_privileged(["apply-file", str(json_path)])
                 self.output.setText(f"Profile updated and applied.\n{apply_output}")
+                # apply_output already contains final offsets; no extra refresh
             else:
                 self.output.setText(f"Profile '{name}' updated (not applied live).")
+            self.offset_spin.setValue(0)
 
         except Exception as e:
             self.output.setText(f"Error updating profile: {e}")
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
 
     def set_as_boot_profile(self):
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
             return
-        profiles_dir = Path("/etc/ruv/profiles")
+        profiles_dir = Path("/etc/ruv/profiles").resolve()
         json_path = profiles_dir / f"{name}.json"
         if not json_path.exists():
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
+
         service_content = f"""[Unit]
 Description=Apply Ryzen undervolt profile '{name}'
 After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart={sys.executable} {SCRIPT_PATH} -- apply-file {json_path}
+ExecStart=/usr/bin/env python3 {SCRIPT_PATH} -- apply-file {json_path}
 RemainAfterExit=no
 
 [Install]
 WantedBy=multi-user.target
 """
         service_path = "/etc/systemd/system/ruv-boot.service"
-        temp_path = None
         try:
-            with tempfile.NamedTemporaryFile(mode='w', delete=False) as tf:
-                tf.write(service_content)
-                temp_path = tf.name
             cmd = [
                 "pkexec", "bash", "-c",
-                f"cp {temp_path} {service_path} && systemctl daemon-reload && systemctl enable ruv-boot.service && rm {temp_path}"
+                f"cat > {service_path} <<'EOF'\n{service_content}\nEOF\n"
+                f"systemctl daemon-reload && systemctl enable ruv-boot.service"
             ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip())
+
             self.output.setText(
                 f"Boot service installed with profile '{name}'.\n"
                 f"Profile will be applied automatically at next boot.\n"
                 f"To remove the service, use 'Remove Boot Service' button."
             )
-        except subprocess.CalledProcessError as e:
-            self.output.setText(f"Error installing boot service: {e.stderr if e.stderr else str(e)}")
         except Exception as e:
             self.output.setText(f"Error installing boot service: {e}")
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                os.unlink(temp_path)
 
     def remove_boot_service(self):
         reply = QMessageBox.question(
