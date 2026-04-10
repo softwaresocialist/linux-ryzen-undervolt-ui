@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+Linux Undervolt Tool for Ryzen CPUs using the ryzen_smu kernel driver.
+Allows reading and setting voltage offsets per core.
+
+WARNING: This tool writes to the SMU (System Management Unit) of your Ryzen CPU.
+Incorrect offsets may cause system instability or damage. Use at your own risk.
+"""
 
 import sys
 import os
@@ -367,7 +374,7 @@ class MainWindow(QMainWindow):
         self.btn_save_profile = QPushButton("Save Current as Profile")
         self.btn_delete_profile = QPushButton("Delete Profile")
         self.btn_apply_profile = QPushButton("Apply Profile")
-        self.btn_update_profile = QPushButton("Update Profile")
+        self.btn_update_profile = QPushButton("Update Selected Cores in Profile")
         profile_layout.addWidget(self.btn_save_profile)
         profile_layout.addWidget(self.btn_delete_profile)
         profile_layout.addWidget(self.btn_apply_profile)
@@ -526,10 +533,20 @@ class MainWindow(QMainWindow):
             self.output.setText(f"Error applying profile: {e}")
 
     def update_profile(self):
+        """
+        Update the selected profile by changing the offset of only the selected cores
+        to the current spinbox value. Other cores retain their existing values.
+        """
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
             return
+
+        selected_cores = self.core_list.get_selected_cores()
+        if not selected_cores:
+            self.output.setText("No cores selected. Please tick at least one core to update.")
+            return
+
         new_offset = self.offset_spin.value()
         if new_offset < -30 or new_offset > 30:
             reply = QMessageBox.warning(
@@ -541,32 +558,59 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
+
         profiles_dir = Path("/etc/ruv/profiles")
         json_path = profiles_dir / f"{name}.json"
+
         if not json_path.exists():
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
+
+        temp_path = None
         try:
+            # Read the existing profile JSON
             with open(json_path, "r") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
+                profile_data = json.load(f)
+
+            if not isinstance(profile_data, dict):
                 raise ValueError("Profile JSON is not a dictionary")
-            for core in data.keys():
-                data[core] = new_offset
-            python_script = f'''
-import json
-with open("{json_path}", "w") as f:
-    json.dump({json.dumps(data)}, f, indent=2)
-'''
-            escaped_script = python_script.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-            cmd = ["pkexec", "bash", "-c", f"python3 -c \"{escaped_script}\""]
+
+            # Update only the selected cores
+            for core in selected_cores:
+                profile_data[str(core)] = new_offset
+
+            # Write updated profile to a temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tf:
+                json.dump(profile_data, tf, indent=2)
+                temp_path = tf.name
+
+            # Move the temp file into place with pkexec
+            cmd = ["pkexec", "mv", temp_path, str(json_path)]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip())
-            self.output.setText(f"Profile '{name}' updated: all cores set to {new_offset} mV.\n"
-                                f"Use 'Apply Profile' to load these offsets live.")
+
+            # Optionally apply the updated profile live
+            apply_reply = QMessageBox.question(
+                self, "Apply Updated Profile",
+                f"Profile '{name}' updated.\nDo you want to apply it to the CPU now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if apply_reply == QMessageBox.StandardButton.Yes:
+                apply_output = run_privileged(["apply-file", str(json_path)])
+                self.output.setText(f"Profile updated and applied.\n{apply_output}")
+            else:
+                self.output.setText(f"Profile '{name}' updated (not applied live).")
+
         except Exception as e:
             self.output.setText(f"Error updating profile: {e}")
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
 
     def set_as_boot_profile(self):
         name = self.profile_combo.currentText()
