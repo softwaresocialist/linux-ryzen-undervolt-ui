@@ -4,13 +4,15 @@ Early development – expect bugs. AI‑assisted code.
 
 ## What is it?
 
-Linux Undervolt Tool for Ryzen CPUs using the ryzen_smu kernel driver.
+Linux Undervolt Tool for Ryzen CPUs using the Ryzen SMU kernel driver.
 Allows reading and setting voltage offsets per core.
 
 ## DISCLAIMER
 
 WARNING: This tool writes to the SMU (System Management Unit) of your Ryzen CPU.
 Incorrect offsets may cause system instability or damage. Use at your own risk.
+Only processors that are supported by the Ryzen SMU driver are supported.
+I only test this on my 5700x3d.
 
 ## Prerequisites
 
@@ -21,7 +23,7 @@ Incorrect offsets may cause system instability or damage. Use at your own risk.
 
 ## Installation
 
-### 1. Install the ryzen_smu driver
+### 1. Install the Ryzen SMU driver
 
 https://github.com/amkillam/ryzen_smu
 
