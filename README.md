@@ -6,6 +6,11 @@ Early development – expect bugs. AI‑assisted code.
 
 A Linux GUI to set per‑core voltage offsets (undervolt) for Ryzen CPUs via the `ryzen_smu` kernel driver.
 
+## DISCLAIMER
+
+WARNING: This tool writes to the SMU (System Management Unit) of your Ryzen CPU.
+Incorrect offsets may cause system instability or damage. Use at your own risk.
+
 ## Prerequisites
 
 - Ryzen CPU (3000 series or newer)
