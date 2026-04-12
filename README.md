@@ -11,8 +11,7 @@ Allows reading and setting voltage offsets per core.
 
 WARNING: This tool writes to the SMU (System Management Unit) of your Ryzen CPU.
 Incorrect offsets may cause system instability or damage. Use at your own risk.
-Only processors that are supported by the Ryzen SMU driver are supported.
-I only test this on my 5700x3d.
+Only processors that are supported by the Ryzen SMU driver should work.
 
 ## Prerequisites
 
