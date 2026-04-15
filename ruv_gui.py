@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QInputDialog, QListWidget,
     QListWidgetItem, QAbstractItemView, QSplitter
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon
 
 # Setup logging
@@ -40,22 +40,42 @@ PROFILES_DIR = Path("/etc/ruv/profiles")
 ICON_FALLBACK_PATH = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
 
 
-def get_cpu_info() -> Tuple[Optional[int], Optional[int]]:
-    """Return (family, model) from /proc/cpuinfo."""
-    try:
-        with open("/proc/cpuinfo") as f:
-            family = None
-            model = None
-            for line in f:
-                if line.startswith("cpu family"):
-                    family = int(line.split(":")[1].strip())
-                elif line.startswith("model"):
-                    model = int(line.split(":")[1].strip())
-                if family is not None and model is not None:
-                    return family, model
-    except Exception:
-        pass
-    return None, None
+class PrivilegedRunner:
+    """Run commands with elevated privileges, handling pkexec failures gracefully."""
+    @staticmethod
+    def run(args: List[str]) -> str:
+        if os.geteuid() != 0 and not shutil.which("pkexec"):
+            raise RuntimeError("pkexec not found. Please install polkit or run this script as root.")
+
+        try:
+            if os.geteuid() == 0:
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT_PATH), "--"] + args,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+            else:
+                result = subprocess.run(
+                    ["pkexec", sys.executable, str(SCRIPT_PATH), "--"] + args,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Operation timed out. The driver may be unresponsive.")
+        except subprocess.CalledProcessError as e:
+            # pkexec returns 126 when user cancels authentication
+            if e.returncode == 126:
+                raise RuntimeError("Authentication cancelled.")
+            raise RuntimeError(f"Privileged command failed: {e.stderr.strip() or e.stdout.strip()}")
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error: {e}")
+
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        logger.debug(f"Privileged command succeeded: {args}")
+        return result.stdout
 
 
 class RyzenSMU:
@@ -130,7 +150,7 @@ class RyzenSMU:
             if status != 0:
                 raise RuntimeError(f"Unexpected SMU status: {status}")
             if time.monotonic() - start > self.SMU_TIMEOUT:
-                raise RuntimeError("Timeout waiting for SMU ready")
+                raise RuntimeError("Timeout waiting for SMU ready. Driver may be busy.")
             time.sleep(0.05)
 
         if not self._write_file192(self.SMU_ARGS, arg1, arg2, arg3, arg4, arg5, arg6):
@@ -148,7 +168,7 @@ class RyzenSMU:
             if status != 0:
                 raise RuntimeError(f"SMU command failed with status {status}")
             if time.monotonic() - start > self.SMU_TIMEOUT:
-                raise RuntimeError("Timeout waiting for SMU command")
+                raise RuntimeError("Timeout waiting for SMU command to complete.")
             time.sleep(0.05)
 
         response = self._read_file192(self.SMU_ARGS)
@@ -220,12 +240,19 @@ def get_physical_core_ids() -> List[int]:
     except Exception:
         pass
 
-    # Fallback 2: use CPU count / 2 (assume SMT)
+    # Fallback 2: use CPU count / 2 only if Hyper-Threading is present
     try:
         total_logical = os.cpu_count()
         if total_logical:
-            physical = total_logical // 2
-            logger.warning(f"Using fallback core count (half of logical CPUs): {physical}")
+            # Check for HT flag
+            ht_enabled = False
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("flags") and " ht " in line:
+                        ht_enabled = True
+                        break
+            physical = total_logical // 2 if ht_enabled else total_logical
+            logger.warning(f"Using fallback core count: {physical} (HT {'enabled' if ht_enabled else 'disabled'})")
             return list(range(physical))
     except Exception:
         pass
@@ -235,31 +262,10 @@ def get_physical_core_ids() -> List[int]:
     return list(range(8))
 
 
-def run_privileged(args: List[str]) -> str:
-    """Run the script with elevated privileges and return stdout."""
-    if os.geteuid() != 0 and not shutil.which("pkexec"):
-        raise RuntimeError("pkexec not found. Please install polkit or run this script as root.")
-    if os.geteuid() == 0:
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT_PATH), "--"] + args,
-            capture_output=True,
-            text=True
-        )
-    else:
-        result = subprocess.run(
-            ["pkexec", sys.executable, str(SCRIPT_PATH), "--"] + args,
-            capture_output=True,
-            text=True
-        )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
-    logger.debug(f"Privileged command succeeded: {args}")
-    return result.stdout
-
-
 def cli_mode(cli_args: List[str]):
     parser = argparse.ArgumentParser(description="Ryzen SMU voltage control")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--force", action="store_true", help="Skip offset range warnings")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list")
@@ -288,6 +294,12 @@ def cli_mode(cli_args: List[str]):
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Warn about out-of-range offsets unless --force is used
+    def warn_offset(off: int):
+        if not args.force and (off < -30 or off > 30):
+            print(f"Warning: Offset {off} mV is outside the typical ±30 mV range.", file=sys.stderr)
+            print("Use --force to suppress this warning.", file=sys.stderr)
 
     if args.command == "read-profile":
         file_path = Path(args.file).resolve()
@@ -328,6 +340,7 @@ def cli_mode(cli_args: List[str]):
             if args.core not in physical_cores:
                 print(f"Error: Core {args.core} does not exist", file=sys.stderr)
                 sys.exit(1)
+            warn_offset(args.offset)
             smu.set_core_offset(args.core, args.offset)
             print(f"OK: Core {args.core} set to {args.offset}")
         elif args.command == "apply-list":
@@ -335,6 +348,7 @@ def cli_mode(cli_args: List[str]):
             if invalid_cores:
                 print(f"Error: Cores {invalid_cores} do not exist", file=sys.stderr)
                 sys.exit(1)
+            warn_offset(args.offset)
             for core in args.cores:
                 smu.set_core_offset(core, args.offset)
             for core in args.cores:
@@ -349,6 +363,10 @@ def cli_mode(cli_args: List[str]):
                 data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("JSON must be an object with core:offset pairs")
+
+            # Check offsets in file
+            for off in data.values():
+                warn_offset(off)
 
             failed = []
             for core_str, offset in data.items():
@@ -376,13 +394,32 @@ def cli_mode(cli_args: List[str]):
                 print(f"{core}: {smu.get_core_offset(core)}")
         elif args.command == "reset":
             smu.reset_all_offsets()
-            print("OK: All offsets reset")
+            print("OK: All offsets reset. Current offsets:")
+            for core in physical_cores:
+                print(f"{core}: {smu.get_core_offset(core)}")
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+class WorkerThread(QThread):
+    """Background thread for running privileged commands without freezing the GUI."""
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, args: List[str]):
+        super().__init__()
+        self.args = args
+
+    def run(self):
+        try:
+            output = PrivilegedRunner.run(self.args)
+            self.finished.emit(output)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class CoreSelectionList(QListWidget):
@@ -415,6 +452,8 @@ class MainWindow(QMainWindow):
 
         self.core_ids = get_physical_core_ids() or list(range(8))
         logger.debug(f"MainWindow core IDs: {self.core_ids}")
+
+        self.workers = []  # Keep references to prevent garbage collection
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -519,19 +558,34 @@ class MainWindow(QMainWindow):
         if not icon.isNull():
             self.setWindowIcon(icon)
 
+    def _cleanup_workers(self):
+        """Remove finished workers from the list."""
+        self.workers = [w for w in self.workers if w.isRunning()]
+
+    def _run_privileged_async(self, args: List[str], on_finish, on_error=None):
+        """Run a privileged command in a background thread."""
+        self._cleanup_workers()
+        worker = WorkerThread(args)
+        worker.finished.connect(on_finish)
+        if on_error:
+            worker.error.connect(on_error)
+        else:
+            worker.error.connect(lambda e: self.output.setText(f"Error: {e}"))
+        # Clean up worker list when thread finishes
+        worker.finished.connect(lambda: self._cleanup_workers())
+        worker.error.connect(lambda: self._cleanup_workers())
+        self.workers.append(worker)
+        worker.start()
+
     def list_offsets(self):
-        try:
-            output = run_privileged(["list"])
+        def on_finish(output):
             self.output.setText(output)
-        except Exception as e:
-            self.output.setText(str(e))
+        self._run_privileged_async(["list"], on_finish)
 
     def reset_offsets(self):
-        try:
-            output = run_privileged(["reset"])
+        def on_finish(output):
             self.output.setText(output)
-        except Exception as e:
-            self.output.setText(str(e))
+        self._run_privileged_async(["reset"], on_finish)
 
     def apply_offset(self):
         selected_cores = self.core_list.get_selected_cores()
@@ -550,12 +604,12 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-        try:
-            output = run_privileged(["apply-list"] + [str(c) for c in selected_cores] + [str(offset)])
+
+        args = ["apply-list"] + [str(c) for c in selected_cores] + [str(offset)]
+        def on_finish(output):
             self.output.setText(output)
             self.offset_spin.setValue(0)
-        except Exception as e:
-            self.output.setText(f"Error applying: {str(e)}")
+        self._run_privileged_async(args, on_finish)
 
     def refresh_profile_list(self):
         self.profile_combo.clear()
@@ -576,7 +630,6 @@ class MainWindow(QMainWindow):
             return
 
         json_path = PROFILES_DIR / f"{name}.json"
-
         script = str(SCRIPT_PATH)
         python = sys.executable
         cmd = [
@@ -631,14 +684,11 @@ class MainWindow(QMainWindow):
         if not json_path.exists():
             self.output.setText(f"Profile file {json_path} not found.")
             return
-        try:
-            output = run_privileged(["apply-file", str(json_path)])
+        def on_finish(output):
             self.output.setText(output)
-        except Exception as e:
-            self.output.setText(f"Error applying profile: {e}")
+        self._run_privileged_async(["apply-file", str(json_path)], on_finish)
 
     def update_profile(self):
-        """Update selected profile's offset for the chosen cores."""
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
@@ -667,7 +717,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            raw_json = run_privileged(["read-profile", str(json_path)])
+            raw_json = PrivilegedRunner.run(["read-profile", str(json_path)])
             try:
                 profile_data = json.loads(raw_json)
             except json.JSONDecodeError as e:
@@ -692,8 +742,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes
             )
             if apply_reply == QMessageBox.StandardButton.Yes:
-                apply_output = run_privileged(["apply-file", str(json_path)])
-                self.output.setText(f"Profile updated and applied.\n{apply_output}")
+                def on_finish(output):
+                    self.output.setText(f"Profile updated and applied.\n{output}")
+                self._run_privileged_async(["apply-file", str(json_path)], on_finish)
             else:
                 self.output.setText(f"Profile '{name}' updated (not applied live).")
             self.offset_spin.setValue(0)
