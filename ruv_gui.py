@@ -58,12 +58,6 @@ def get_cpu_info() -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def is_zen1_or_zenplus() -> bool:
-    """Return True if CPU is Zen 1 or Zen+ (family 23, model 1 or 8)."""
-    family, model = get_cpu_info()
-    return family == 23 and model in (1, 8)
-
-
 class RyzenSMU:
     """Low-level interface to the ryzen_smu kernel driver."""
     FS_PATH = Path("/sys/kernel/ryzen_smu_drv/")
@@ -295,11 +289,6 @@ def cli_mode(cli_args: List[str]):
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Warn for Zen 1 / Zen+ on any set operation
-    if is_zen1_or_zenplus() and args.command in ("set", "apply-list", "apply-file", "reset"):
-        print("Warning: Zen 1 / Zen+ CPUs may use different SMU commands. This tool is optimized for Zen 2 and newer.",
-              file=sys.stderr)
-
     if args.command == "read-profile":
         file_path = Path(args.file).resolve()
         try:
@@ -522,7 +511,6 @@ class MainWindow(QMainWindow):
 
         self.refresh_profile_list()
         self.list_offsets()
-        self._check_cpu_support()
 
     def _set_window_icon(self):
         icon = QIcon.fromTheme("ruv-gui")
@@ -530,16 +518,6 @@ class MainWindow(QMainWindow):
             icon = QIcon(ICON_FALLBACK_PATH)
         if not icon.isNull():
             self.setWindowIcon(icon)
-
-    def _check_cpu_support(self):
-        """Show a warning if running on Zen 1 / Zen+."""
-        if is_zen1_or_zenplus():
-            QMessageBox.warning(
-                self,
-                "CPU Compatibility Warning",
-                "Your CPU appears to be Zen 1 or Zen+.\n\n"
-                "This tool only works for Zen 2 or newer.\n\n"
-            )
 
     def list_offsets(self):
         try:
