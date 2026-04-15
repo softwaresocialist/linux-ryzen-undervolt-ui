@@ -26,7 +26,7 @@ Only processors that are supported by the Ryzen SMU driver should work.
 
 https://github.com/amkillam/ryzen_smu
 
-## 2. Install the GUI tool
+## 2. Install the tool
 ```bash
 git clone https://github.com/softwaresocialist/linux-ryzen-undervolt-ui.git
 cd linux-ryzen-undervolt-ui
