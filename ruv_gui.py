@@ -79,6 +79,7 @@ class RyzenSMU:
     def __init__(self):
         if not self.driver_loaded():
             raise RuntimeError("Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu")
+        logger.debug("RyzenSMU initialized")
 
     @classmethod
     def driver_loaded(cls):
@@ -175,21 +176,27 @@ class RyzenSMU:
         arg = (((core_id & 8) << 5 | (core_id & 7)) << 20) | (offset & 0xFFFF)
         try:
             self.smu_command(self.CMD_SET_OFFSET, arg)
+            logger.debug(f"Set core {core_id} offset to {offset}")
         except Exception:
             if old_offset is not None:
                 try:
                     rollback_arg = (((core_id & 8) << 5 | (core_id & 7)) << 20) | (old_offset & 0xFFFF)
                     self.smu_command(self.CMD_SET_OFFSET, rollback_arg)
+                    logger.debug(f"Rolled back core {core_id} to {old_offset}")
                 except Exception as e:
                     logger.error(f"Rollback failed for core {core_id}: {e}")
             raise
 
     def reset_all_offsets(self):
         self.smu_command(self.CMD_RESET_ALL, 0)
+        logger.debug("Reset all offsets")
 
 
 def get_physical_core_ids() -> List[int]:
-    """Return sorted list of physical core IDs present on the system."""
+    """
+    Return sorted list of physical core IDs present on the system.
+    Tries sysfs topology first, then falls back to /proc/cpuinfo.
+    """
     cpu_path = Path("/sys/devices/system/cpu")
     core_ids = set()
     for cpu_dir in cpu_path.glob("cpu[0-9]*"):
@@ -201,21 +208,40 @@ def get_physical_core_ids() -> List[int]:
             except Exception:
                 pass
     if core_ids:
+        logger.debug(f"Detected cores via sysfs: {sorted(core_ids)}")
         return sorted(core_ids)
 
-    # Fallback: try to use CPU affinity mask to guess number of cores
+    # Fallback 1: parse /proc/cpuinfo for "cpu cores"
     try:
-        affinity = os.sched_getaffinity(0)
-        max_logical = max(affinity) + 1
-        physical_cores = max_logical // 2
-        logger.warning("Using fallback core count: %d", physical_cores)
-        return list(range(physical_cores))
+        with open("/proc/cpuinfo") as f:
+            cores = None
+            for line in f:
+                if line.startswith("cpu cores"):
+                    cores = int(line.split(":")[1].strip())
+                    break
+            if cores:
+                logger.debug(f"Detected cores via /proc/cpuinfo: {cores}")
+                return list(range(cores))
     except Exception:
-        logger.warning("Could not read physical core IDs, falling back to 8 cores")
-        return list(range(8))
+        pass
+
+    # Fallback 2: use CPU count / 2 (assume SMT)
+    try:
+        total_logical = os.cpu_count()
+        if total_logical:
+            physical = total_logical // 2
+            logger.warning(f"Using fallback core count (half of logical CPUs): {physical}")
+            return list(range(physical))
+    except Exception:
+        pass
+
+    # Last resort
+    logger.warning("Could not determine core count, assuming 8 cores")
+    return list(range(8))
 
 
 SCRIPT_PATH = Path(__file__).resolve()
+INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"  # Where install.sh places the script
 
 
 def run_privileged(args: List[str]) -> str:
@@ -236,6 +262,7 @@ def run_privileged(args: List[str]) -> str:
         )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    logger.debug(f"Privileged command succeeded: {args}")
     return result.stdout
 
 
@@ -263,7 +290,6 @@ def cli_mode(cli_args: List[str]):
 
     subparsers.add_parser("reset")
 
-    # New command to read a profile file (used by GUI update)
     read_profile_parser = subparsers.add_parser("read-profile")
     read_profile_parser.add_argument("file", type=str, help="JSON file to read and output")
 
@@ -278,7 +304,6 @@ def cli_mode(cli_args: List[str]):
               file=sys.stderr)
 
     if args.command == "read-profile":
-        # This command just reads a file and prints its content; no SMU driver needed.
         file_path = Path(args.file).resolve()
         profiles_dir = Path("/etc/ruv/profiles").resolve()
         try:
@@ -407,6 +432,7 @@ class MainWindow(QMainWindow):
         self.core_ids = get_physical_core_ids()
         if not self.core_ids:
             self.core_ids = list(range(8))
+        logger.debug(f"MainWindow core IDs: {self.core_ids}")
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -444,12 +470,9 @@ class MainWindow(QMainWindow):
 
         right_layout.addSpacing(20)
 
-        btn_row = QHBoxLayout()
+        # Single button to show offsets (no separate refresh needed)
         self.btn_list = QPushButton("Show Current Offsets")
-        self.btn_refresh = QPushButton("Refresh Offsets")
-        btn_row.addWidget(self.btn_list)
-        btn_row.addWidget(self.btn_refresh)
-        right_layout.addLayout(btn_row)
+        right_layout.addWidget(self.btn_list)
 
         self.btn_reset = QPushButton("Reset All Offsets")
         right_layout.addWidget(self.btn_reset)
@@ -496,7 +519,6 @@ class MainWindow(QMainWindow):
 
         # Connect signals
         self.btn_list.clicked.connect(self.list_offsets)
-        self.btn_refresh.clicked.connect(self.refresh_offsets)
         self.btn_reset.clicked.connect(self.reset_offsets)
         self.btn_apply.clicked.connect(self.apply_offset)
         self.btn_save_profile.clicked.connect(self.save_current_as_profile)
@@ -507,7 +529,7 @@ class MainWindow(QMainWindow):
         self.btn_remove_boot.clicked.connect(self.remove_boot_service)
 
         self.refresh_profile_list()
-        self.refresh_offsets()  # Show current offsets on startup
+        self.list_offsets()  # Show current offsets on startup
         self._check_cpu_support()  # Warn if unsupported CPU
 
     def _set_window_icon(self):
@@ -526,9 +548,7 @@ class MainWindow(QMainWindow):
                 self,
                 "CPU Compatibility Warning",
                 "Your CPU appears to be Zen 1 or Zen+.\n\n"
-                "This tool is optimized for Zen 2 and newer. "
-                "Voltage offset commands may not work correctly on this generation.\n\n"
-                "Proceed with caution."
+                "This tool only works for Zen 2 or newer.\n\n"
             )
 
     def list_offsets(self):
@@ -537,9 +557,6 @@ class MainWindow(QMainWindow):
             self.output.setText(output)
         except Exception as e:
             self.output.setText(str(e))
-
-    def refresh_offsets(self):
-        self.list_offsets()  # Same operation
 
     def reset_offsets(self):
         try:
@@ -691,7 +708,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # Read the profile file using the new CLI subcommand (runs as root)
+            # Read the profile file using the CLI subcommand (runs as root)
             raw_json = run_privileged(["read-profile", str(json_path)])
             try:
                 profile_data = json.loads(raw_json)
@@ -739,13 +756,15 @@ class MainWindow(QMainWindow):
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
 
+        # Use the installed path for the service to avoid breakage if the script moves
+        script_for_service = INSTALLED_BIN_PATH
         service_content = f"""[Unit]
 Description=Apply Ryzen undervolt profile '{name}'
 After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env python3 {SCRIPT_PATH} -- apply-file {json_path}
+ExecStart=/usr/bin/env python3 {script_for_service} -- apply-file {json_path}
 RemainAfterExit=no
 
 [Install]
