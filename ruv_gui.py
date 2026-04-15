@@ -33,6 +33,13 @@ else:
     logging.basicConfig(level=logging.WARNING)
 
 
+# Paths
+SCRIPT_PATH = Path(__file__).resolve()
+INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"
+PROFILES_DIR = Path("/etc/ruv/profiles")
+ICON_FALLBACK_PATH = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
+
+
 def get_cpu_info() -> Tuple[Optional[int], Optional[int]]:
     """Return (family, model) from /proc/cpuinfo."""
     try:
@@ -44,8 +51,8 @@ def get_cpu_info() -> Tuple[Optional[int], Optional[int]]:
                     family = int(line.split(":")[1].strip())
                 elif line.startswith("model"):
                     model = int(line.split(":")[1].strip())
-                    if family is not None:
-                        return family, model
+                if family is not None and model is not None:
+                    return family, model
     except Exception:
         pass
     return None, None
@@ -54,10 +61,7 @@ def get_cpu_info() -> Tuple[Optional[int], Optional[int]]:
 def is_zen1_or_zenplus() -> bool:
     """Return True if CPU is Zen 1 or Zen+ (family 23, model 1 or 8)."""
     family, model = get_cpu_info()
-    if family == 23:  # Zen family (17h)
-        if model in (1, 8):  # Zen 1 (model 1), Zen+ (model 8)
-            return True
-    return False
+    return family == 23 and model in (1, 8)
 
 
 class RyzenSMU:
@@ -214,14 +218,11 @@ def get_physical_core_ids() -> List[int]:
     # Fallback 1: parse /proc/cpuinfo for "cpu cores"
     try:
         with open("/proc/cpuinfo") as f:
-            cores = None
             for line in f:
                 if line.startswith("cpu cores"):
                     cores = int(line.split(":")[1].strip())
-                    break
-            if cores:
-                logger.debug(f"Detected cores via /proc/cpuinfo: {cores}")
-                return list(range(cores))
+                    logger.debug(f"Detected cores via /proc/cpuinfo: {cores}")
+                    return list(range(cores))
     except Exception:
         pass
 
@@ -238,10 +239,6 @@ def get_physical_core_ids() -> List[int]:
     # Last resort
     logger.warning("Could not determine core count, assuming 8 cores")
     return list(range(8))
-
-
-SCRIPT_PATH = Path(__file__).resolve()
-INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"  # Where install.sh places the script
 
 
 def run_privileged(args: List[str]) -> str:
@@ -305,11 +302,10 @@ def cli_mode(cli_args: List[str]):
 
     if args.command == "read-profile":
         file_path = Path(args.file).resolve()
-        profiles_dir = Path("/etc/ruv/profiles").resolve()
         try:
-            file_path.relative_to(profiles_dir)
+            file_path.relative_to(PROFILES_DIR)
         except ValueError:
-            print(f"Error: Profile file {file_path} is not under {profiles_dir}", file=sys.stderr)
+            print(f"Error: Profile file {file_path} is not under {PROFILES_DIR}", file=sys.stderr)
             sys.exit(1)
         try:
             with open(file_path, "r") as f:
@@ -356,11 +352,10 @@ def cli_mode(cli_args: List[str]):
                 print(f"{core}: {smu.get_core_offset(core)}")
         elif args.command == "apply-file":
             file_path = Path(args.file).resolve()
-            profiles_dir = Path("/etc/ruv/profiles").resolve()
             try:
-                file_path.relative_to(profiles_dir)
+                file_path.relative_to(PROFILES_DIR)
             except ValueError:
-                raise ValueError(f"Profile file {file_path} is not under {profiles_dir}")
+                raise ValueError(f"Profile file {file_path} is not under {PROFILES_DIR}")
             with open(file_path) as f:
                 data = json.load(f)
             if not isinstance(data, dict):
@@ -429,9 +424,7 @@ class MainWindow(QMainWindow):
         self.resize(800, 600)
         self._set_window_icon()
 
-        self.core_ids = get_physical_core_ids()
-        if not self.core_ids:
-            self.core_ids = list(range(8))
+        self.core_ids = get_physical_core_ids() or list(range(8))
         logger.debug(f"MainWindow core IDs: {self.core_ids}")
 
         central = QWidget()
@@ -470,7 +463,6 @@ class MainWindow(QMainWindow):
 
         right_layout.addSpacing(20)
 
-        # Single button to show offsets (no separate refresh needed)
         self.btn_list = QPushButton("Show Current Offsets")
         right_layout.addWidget(self.btn_list)
 
@@ -529,15 +521,13 @@ class MainWindow(QMainWindow):
         self.btn_remove_boot.clicked.connect(self.remove_boot_service)
 
         self.refresh_profile_list()
-        self.list_offsets()  # Show current offsets on startup
-        self._check_cpu_support()  # Warn if unsupported CPU
+        self.list_offsets()
+        self._check_cpu_support()
 
     def _set_window_icon(self):
         icon = QIcon.fromTheme("ruv-gui")
-        if icon.isNull():
-            fallback_path = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
-            if os.path.exists(fallback_path):
-                icon = QIcon(fallback_path)
+        if icon.isNull() and os.path.exists(ICON_FALLBACK_PATH):
+            icon = QIcon(ICON_FALLBACK_PATH)
         if not icon.isNull():
             self.setWindowIcon(icon)
 
@@ -585,16 +575,15 @@ class MainWindow(QMainWindow):
         try:
             output = run_privileged(["apply-list"] + [str(c) for c in selected_cores] + [str(offset)])
             self.output.setText(output)
-            self.offset_spin.setValue(0)  # Reset after successful apply
+            self.offset_spin.setValue(0)
         except Exception as e:
             self.output.setText(f"Error applying: {str(e)}")
 
     def refresh_profile_list(self):
-        profiles_dir = Path("/etc/ruv/profiles")
         self.profile_combo.clear()
         try:
-            if profiles_dir.exists():
-                for f in profiles_dir.glob("*.json"):
+            if PROFILES_DIR.exists():
+                for f in PROFILES_DIR.glob("*.json"):
                     self.profile_combo.addItem(f.stem)
         except Exception as e:
             self.output.append(f"Error scanning profiles: {e}")
@@ -608,14 +597,13 @@ class MainWindow(QMainWindow):
             self.output.setText("Invalid profile name. Use only letters, numbers, underscore, hyphen, and dot.")
             return
 
-        profiles_dir = "/etc/ruv/profiles"
-        json_path = f"{profiles_dir}/{name}.json"
+        json_path = PROFILES_DIR / f"{name}.json"
 
         script = str(SCRIPT_PATH)
         python = sys.executable
         cmd = [
             "pkexec", "bash", "-c",
-            f"mkdir -p {profiles_dir} && {python} {script} -- list --json > {json_path}"
+            f"mkdir -p {PROFILES_DIR} && {python} {script} -- list --json > {json_path}"
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -641,8 +629,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         try:
-            profiles_dir = "/etc/ruv/profiles"
-            json_path = f"{profiles_dir}/{name}.json"
+            json_path = PROFILES_DIR / f"{name}.json"
             script = str(SCRIPT_PATH)
             python = sys.executable
             cmd = [
@@ -662,22 +649,18 @@ class MainWindow(QMainWindow):
         if not name:
             self.output.setText("No profile selected.")
             return
+        json_path = PROFILES_DIR / f"{name}.json"
+        if not json_path.exists():
+            self.output.setText(f"Profile file {json_path} not found.")
+            return
         try:
-            profiles_dir = Path("/etc/ruv/profiles").resolve()
-            json_path = profiles_dir / f"{name}.json"
-            if not json_path.exists():
-                self.output.setText(f"Profile file {json_path} not found.")
-                return
             output = run_privileged(["apply-file", str(json_path)])
             self.output.setText(output)
         except Exception as e:
             self.output.setText(f"Error applying profile: {e}")
 
     def update_profile(self):
-        """
-        Update the selected profile by changing the offset of only the selected cores
-        to the current spinbox value. Other cores retain their existing values.
-        """
+        """Update selected profile's offset for the chosen cores."""
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
@@ -700,15 +683,12 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        profiles_dir = Path("/etc/ruv/profiles").resolve()
-        json_path = profiles_dir / f"{name}.json"
-
+        json_path = PROFILES_DIR / f"{name}.json"
         if not json_path.exists():
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
 
         try:
-            # Read the profile file using the CLI subcommand (runs as root)
             raw_json = run_privileged(["read-profile", str(json_path)])
             try:
                 profile_data = json.loads(raw_json)
@@ -718,11 +698,9 @@ class MainWindow(QMainWindow):
             if not isinstance(profile_data, dict):
                 raise ValueError("Profile JSON is not a dictionary")
 
-            # Update selected cores
             for core in selected_cores:
                 profile_data[str(core)] = new_offset
 
-            # Write the modified JSON back using pkexec tee
             json_text = json.dumps(profile_data, indent=2)
             write_cmd = ["pkexec", "tee", str(json_path)]
             write_result = subprocess.run(write_cmd, input=json_text, text=True, capture_output=True)
@@ -750,21 +728,18 @@ class MainWindow(QMainWindow):
         if not name:
             self.output.setText("No profile selected.")
             return
-        profiles_dir = Path("/etc/ruv/profiles").resolve()
-        json_path = profiles_dir / f"{name}.json"
+        json_path = PROFILES_DIR / f"{name}.json"
         if not json_path.exists():
             self.output.setText(f"Profile '{name}' does not exist (file missing).")
             return
 
-        # Use the installed path for the service to avoid breakage if the script moves
-        script_for_service = INSTALLED_BIN_PATH
         service_content = f"""[Unit]
 Description=Apply Ryzen undervolt profile '{name}'
 After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env python3 {script_for_service} -- apply-file {json_path}
+ExecStart=/usr/bin/env python3 {INSTALLED_BIN_PATH} -- apply-file {json_path}
 RemainAfterExit=no
 
 [Install]
@@ -826,10 +801,8 @@ if __name__ == "__main__":
         QApplication.setDesktopFileName("ruv-gui")
         app = QApplication(sys.argv)
         app_icon = QIcon.fromTheme("ruv-gui")
-        if app_icon.isNull():
-            fallback_path = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
-            if os.path.exists(fallback_path):
-                app_icon = QIcon(fallback_path)
+        if app_icon.isNull() and os.path.exists(ICON_FALLBACK_PATH):
+            app_icon = QIcon(ICON_FALLBACK_PATH)
         if not app_icon.isNull():
             app.setWindowIcon(app_icon)
         window = MainWindow()
