@@ -15,7 +15,7 @@ Only processors that are supported by the Ryzen SMU driver should work.
 
 ## Prerequisites
 
-- Ryzen CPU (3000 series or newer)
+- Ryzen CPU
 - Python 3.8+ with PyQt6 installed
 - polkit (`pkexec`)
 - The `ryzen_smu` kernel driver
