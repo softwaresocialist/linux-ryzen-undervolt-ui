@@ -287,6 +287,10 @@ Examples:
     status_parser = subparsers.add_parser("status", help="Show current core voltage offsets")
     status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
+    # Legacy alias: "list" -> "status"
+    list_parser = subparsers.add_parser("list", help=argparse.SUPPRESS)
+    list_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+
     # get
     get_parser = subparsers.add_parser("get", help="Get offset for a specific core")
     get_parser.add_argument("core", type=int, help="Core ID")
@@ -296,9 +300,22 @@ Examples:
     set_parser.add_argument("core", type=int, help="Core ID")
     set_parser.add_argument("offset", type=int, help="Offset in mV")
 
-    # apply
+    # apply (profile by name)
     apply_parser = subparsers.add_parser("apply", help="Apply a saved profile by name")
     apply_parser.add_argument("name", help="Profile name (without .json)")
+
+    # Legacy alias: "apply-file" -> "apply" but with file path
+    apply_file_parser = subparsers.add_parser("apply-file", help=argparse.SUPPRESS)
+    apply_file_parser.add_argument("file", type=str)
+
+    # Legacy alias: "apply-list" -> apply offsets to listed cores
+    apply_list_parser = subparsers.add_parser("apply-list", help=argparse.SUPPRESS)
+    apply_list_parser.add_argument("cores", type=int, nargs="+")
+    apply_list_parser.add_argument("offset", type=int)
+
+    # Legacy internal: "read-profile" (used by GUI)
+    read_profile_parser = subparsers.add_parser("read-profile", help=argparse.SUPPRESS)
+    read_profile_parser.add_argument("file", type=str)
 
     # profile
     profile_parser = subparsers.add_parser("profile", help="Manage profiles")
@@ -339,6 +356,47 @@ Examples:
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # ------------------------------------------------------------------
+    # Handle legacy aliases and internal GUI commands first
+    # ------------------------------------------------------------------
+    if args.command == "read-profile":
+        _legacy_read_profile(args.file)
+        return
+
+    if args.command == "list":
+        # Alias to status
+        args.command = "status"
+    elif args.command == "apply-file":
+        # Convert to apply by extracting profile name from file path
+        json_path = Path(args.file).resolve()
+        try:
+            json_path.relative_to(PROFILES_DIR)
+        except ValueError:
+            print(f"Error: Profile file {json_path} is not under {PROFILES_DIR}", file=sys.stderr)
+            sys.exit(1)
+        args.command = "apply"
+        args.name = json_path.stem
+    elif args.command == "apply-list":
+        # Directly apply offsets to listed cores (no profile involved)
+        if not RyzenSMU.driver_loaded():
+            print("Error: Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu", file=sys.stderr)
+            sys.exit(1)
+        smu = RyzenSMU()
+        physical_cores = get_physical_core_ids()
+        invalid_cores = [c for c in args.cores if c not in physical_cores]
+        if invalid_cores:
+            print(f"Error: Cores {invalid_cores} do not exist", file=sys.stderr)
+            sys.exit(1)
+        try:
+            for core in args.cores:
+                smu.set_core_offset(core, args.offset)
+            for core in args.cores:
+                print(f"{core}: {smu.get_core_offset(core)}")
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     # Commands that don't require driver
     if args.command == "profile" and args.profile_cmd in ("list", "delete", "update", "save"):
@@ -401,7 +459,9 @@ Examples:
                 for err in failed:
                     print(f"  {err}", file=sys.stderr)
                 sys.exit(1)
-            print(f"Profile '{args.name}' applied successfully.")
+            print(f"Profile '{args.name}' applied successfully. Current offsets:")
+            for core in physical_cores:
+                print(f"Core {core}: {smu.get_core_offset(core)} mV")
         elif args.command == "reset":
             smu.reset_all_offsets()
             print("All offsets reset to 0 mV")
@@ -409,6 +469,22 @@ Examples:
             parser.print_help()
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _legacy_read_profile(file_path: str):
+    """Internal command used by GUI to read a profile file."""
+    path = Path(file_path).resolve()
+    try:
+        path.relative_to(PROFILES_DIR)
+    except ValueError:
+        print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with open(path, "r") as f:
+            print(f.read(), end="")
+    except Exception as e:
+        print(f"Error reading profile: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -770,7 +846,7 @@ class MainWindow(QMainWindow):
     def list_offsets(self):
         def on_finish(output):
             self.output.setText(output)
-        self._run_privileged_async(["list"], on_finish)
+        self._run_privileged_async(["list"], on_finish)   # legacy alias still works
 
     def reset_offsets(self):
         def on_finish(output):
@@ -865,7 +941,7 @@ class MainWindow(QMainWindow):
             return
         def on_finish(output):
             self.output.setText(output)
-        self._run_privileged_async(["apply-file", str(json_path)], on_finish)
+        self._run_privileged_async(["apply-file", str(json_path)], on_finish)   # legacy alias
 
     def update_profile(self):
         name = self.profile_combo.currentText()
@@ -886,7 +962,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            raw_json = PrivilegedRunner.run(["read-profile", str(json_path)])
+            raw_json = PrivilegedRunner.run(["read-profile", str(json_path)])   # legacy internal
             try:
                 profile_data = json.loads(raw_json)
             except json.JSONDecodeError as e:
@@ -913,7 +989,7 @@ class MainWindow(QMainWindow):
             if apply_reply == QMessageBox.StandardButton.Yes:
                 def on_finish(output):
                     self.output.setText(f"Profile updated and applied.\n{output}")
-                self._run_privileged_async(["apply-file", str(json_path)], on_finish)
+                self._run_privileged_async(["apply-file", str(json_path)], on_finish)   # legacy alias
             else:
                 self.output.setText(f"Profile '{name}' updated (not applied live).")
             self.offset_spin.setValue(0)
