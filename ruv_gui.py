@@ -11,7 +11,7 @@ import shutil
 import re
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.theme=false"
 
@@ -23,17 +23,14 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QAbstractItemView, QSplitter
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QCursor
 
-# Setup logging
 logger = logging.getLogger("ruv")
 if os.environ.get("RUV_DEBUG"):
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 else:
     logging.basicConfig(level=logging.WARNING)
 
-
-# Paths
 SCRIPT_PATH = Path(__file__).resolve()
 INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"
 PROFILES_DIR = Path("/etc/ruv/profiles")
@@ -41,23 +38,25 @@ ICON_FALLBACK_PATH = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
 
 
 class PrivilegedRunner:
-    """Run commands with elevated privileges, handling pkexec failures gracefully."""
     @staticmethod
-    def run(args: List[str]) -> str:
+    def run(args: List[str], input_text: Optional[str] = None) -> str:
         if os.geteuid() != 0 and not shutil.which("pkexec"):
-            raise RuntimeError("pkexec not found. Please install polkit or run this script as root.")
+            raise RuntimeError("pkexec not found. Please install polkit or run as root.")
 
         try:
             if os.geteuid() == 0:
                 result = subprocess.run(
                     [sys.executable, str(SCRIPT_PATH), "--"] + args,
+                    input=input_text,
                     capture_output=True,
                     text=True,
                     timeout=30
                 )
             else:
+                cmd = ["pkexec", sys.executable, str(SCRIPT_PATH), "--"] + args
                 result = subprocess.run(
-                    ["pkexec", sys.executable, str(SCRIPT_PATH), "--"] + args,
+                    cmd,
+                    input=input_text,
                     capture_output=True,
                     text=True,
                     timeout=30
@@ -65,7 +64,6 @@ class PrivilegedRunner:
         except subprocess.TimeoutExpired:
             raise RuntimeError("Operation timed out. The driver may be unresponsive.")
         except subprocess.CalledProcessError as e:
-            # pkexec returns 126 when user cancels authentication
             if e.returncode == 126:
                 raise RuntimeError("Authentication cancelled.")
             raise RuntimeError(f"Privileged command failed: {e.stderr.strip() or e.stdout.strip()}")
@@ -79,7 +77,6 @@ class PrivilegedRunner:
 
 
 class RyzenSMU:
-    """Low-level interface to the ryzen_smu kernel driver."""
     FS_PATH = Path("/sys/kernel/ryzen_smu_drv/")
     VER_PATH = FS_PATH / "version"
     SMU_ARGS = FS_PATH / "smu_args"
@@ -90,7 +87,6 @@ class RyzenSMU:
     CMD_RESET_ALL = 0x36
 
     SMU_TIMEOUT = 5.0
-
     MIN_OFFSET = -100
     MAX_OFFSET = 100
 
@@ -211,54 +207,73 @@ class RyzenSMU:
 
 
 def get_physical_core_ids() -> List[int]:
-    """
-    Return sorted list of physical core IDs present on the system.
-    Tries sysfs topology first, then falls back to /proc/cpuinfo.
-    """
     cpu_path = Path("/sys/devices/system/cpu")
+    present_file = cpu_path / "present"
+    cpu_nums = set()
+
+    if present_file.exists():
+        try:
+            with open(present_file) as f:
+                present = f.read().strip()
+            for part in present.split(','):
+                if '-' in part:
+                    start, end = map(int, part.split('-'))
+                    cpu_nums.update(range(start, end + 1))
+                else:
+                    cpu_nums.add(int(part))
+        except Exception:
+            for cpu_dir in cpu_path.glob("cpu[0-9]*"):
+                try:
+                    cpu_nums.add(int(cpu_dir.name[3:]))
+                except ValueError:
+                    pass
+    else:
+        for cpu_dir in cpu_path.glob("cpu[0-9]*"):
+            try:
+                cpu_nums.add(int(cpu_dir.name[3:]))
+            except ValueError:
+                pass
+
     core_ids = set()
-    for cpu_dir in cpu_path.glob("cpu[0-9]*"):
-        core_file = cpu_dir / "topology" / "core_id"
+    for cpu in cpu_nums:
+        core_file = cpu_path / f"cpu{cpu}" / "topology" / "core_id"
         if core_file.exists():
             try:
                 with open(core_file) as f:
                     core_ids.add(int(f.read().strip()))
             except Exception:
                 pass
+
     if core_ids:
         logger.debug(f"Detected cores via sysfs: {sorted(core_ids)}")
         return sorted(core_ids)
 
-    # Fallback 1: parse /proc/cpuinfo for "cpu cores"
     try:
         with open("/proc/cpuinfo") as f:
             for line in f:
                 if line.startswith("cpu cores"):
                     cores = int(line.split(":")[1].strip())
-                    logger.debug(f"Detected cores via /proc/cpuinfo: {cores}")
+                    logger.debug(f"Fallback /proc/cpuinfo: {cores} cores")
                     return list(range(cores))
     except Exception:
         pass
 
-    # Fallback 2: use CPU count / 2 only if Hyper-Threading is present
-    try:
-        total_logical = os.cpu_count()
-        if total_logical:
-            # Check for HT flag
-            ht_enabled = False
+    total_logical = os.cpu_count()
+    if total_logical:
+        ht_enabled = False
+        try:
             with open("/proc/cpuinfo") as f:
                 for line in f:
                     if line.startswith("flags") and " ht " in line:
                         ht_enabled = True
                         break
-            physical = total_logical // 2 if ht_enabled else total_logical
-            logger.warning(f"Using fallback core count: {physical} (HT {'enabled' if ht_enabled else 'disabled'})")
-            return list(range(physical))
-    except Exception:
-        pass
+        except Exception:
+            pass
+        physical = total_logical // 2 if ht_enabled else total_logical
+        logger.warning(f"Fallback core count: {physical}")
+        return list(range(physical))
 
-    # Last resort
-    logger.warning("Could not determine core count, assuming 8 cores")
+    logger.warning("Assuming 8 cores")
     return list(range(8))
 
 
@@ -283,73 +298,64 @@ Examples:
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # status
     status_parser = subparsers.add_parser("status", help="Show current core voltage offsets")
     status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
-    # Legacy alias: "list" -> "status"
     list_parser = subparsers.add_parser("list", help=argparse.SUPPRESS)
     list_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
 
-    # get
     get_parser = subparsers.add_parser("get", help="Get offset for a specific core")
     get_parser.add_argument("core", type=int, help="Core ID")
 
-    # set
     set_parser = subparsers.add_parser("set", help="Set offset for a specific core")
     set_parser.add_argument("core", type=int, help="Core ID")
     set_parser.add_argument("offset", type=int, help="Offset in mV")
 
-    # apply (profile by name)
     apply_parser = subparsers.add_parser("apply", help="Apply a saved profile by name")
     apply_parser.add_argument("name", help="Profile name (without .json)")
 
-    # Legacy alias: "apply-file" -> "apply" but with file path
     apply_file_parser = subparsers.add_parser("apply-file", help=argparse.SUPPRESS)
     apply_file_parser.add_argument("file", type=str)
 
-    # Legacy alias: "apply-list" -> apply offsets to listed cores
     apply_list_parser = subparsers.add_parser("apply-list", help=argparse.SUPPRESS)
     apply_list_parser.add_argument("cores", type=int, nargs="+")
     apply_list_parser.add_argument("offset", type=int)
 
-    # Legacy internal: "read-profile" (used by GUI)
     read_profile_parser = subparsers.add_parser("read-profile", help=argparse.SUPPRESS)
     read_profile_parser.add_argument("file", type=str)
 
-    # profile
+    write_profile_parser = subparsers.add_parser("write-profile", help=argparse.SUPPRESS)
+    write_profile_parser.add_argument("file", type=str)
+
+    delete_profile_file_parser = subparsers.add_parser("delete-profile-file", help=argparse.SUPPRESS)
+    delete_profile_file_parser.add_argument("file", type=str)
+
+    install_boot_service_parser = subparsers.add_parser("install-boot-service", help=argparse.SUPPRESS)
+    install_boot_service_parser.add_argument("service_path", type=str)
+
+    remove_boot_service_parser = subparsers.add_parser("remove-boot-service", help=argparse.SUPPRESS)
+
     profile_parser = subparsers.add_parser("profile", help="Manage profiles")
     profile_sub = profile_parser.add_subparsers(dest="profile_cmd", required=True)
 
     profile_list = profile_sub.add_parser("list", help="List saved profiles")
-
     profile_save = profile_sub.add_parser("save", help="Save current offsets as a profile")
     profile_save.add_argument("name", help="Profile name (alphanumeric, underscore, hyphen, dot)")
-
     profile_delete = profile_sub.add_parser("delete", help="Delete a profile")
     profile_delete.add_argument("name", help="Profile name")
-
     profile_update = profile_sub.add_parser("update", help="Update specific cores in a profile")
     profile_update.add_argument("name", help="Profile name")
-    profile_update.add_argument("--cores", type=int, nargs="+", required=True,
-                                help="List of core IDs to update")
-    profile_update.add_argument("--offset", type=int, required=True,
-                                help="New offset value in mV")
-    profile_update.add_argument("--apply", action="store_true",
-                                help="Also apply the updated profile to the CPU immediately")
+    profile_update.add_argument("--cores", type=int, nargs="+", required=True)
+    profile_update.add_argument("--offset", type=int, required=True)
+    profile_update.add_argument("--apply", action="store_true")
 
-    # boot
     boot_parser = subparsers.add_parser("boot", help="Manage boot-time application")
     boot_sub = boot_parser.add_subparsers(dest="boot_cmd", required=True)
-
     boot_enable = boot_sub.add_parser("enable", help="Enable automatic profile application at boot")
     boot_enable.add_argument("name", help="Profile name to apply at boot")
-
     boot_disable = boot_sub.add_parser("disable", help="Disable boot-time application")
-
     boot_status = boot_sub.add_parser("status", help="Show boot service status")
 
-    # reset
     subparsers.add_parser("reset", help="Reset all offsets to 0")
 
     args = parser.parse_args(cli_args)
@@ -357,18 +363,82 @@ Examples:
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # ------------------------------------------------------------------
-    # Handle legacy aliases and internal GUI commands first
-    # ------------------------------------------------------------------
     if args.command == "read-profile":
-        _legacy_read_profile(args.file)
+        path = Path(args.file).resolve()
+        try:
+            path.relative_to(PROFILES_DIR)
+        except ValueError:
+            print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            with open(path, "r") as f:
+                print(f.read(), end="")
+        except Exception as e:
+            print(f"Error reading profile: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "write-profile":
+        path = Path(args.file).resolve()
+        try:
+            path.relative_to(PROFILES_DIR)
+        except ValueError:
+            print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            data = sys.stdin.read()
+            json.loads(data)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as f:
+                f.write(data)
+        except Exception as e:
+            print(f"Error writing profile: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "delete-profile-file":
+        path = Path(args.file).resolve()
+        try:
+            path.relative_to(PROFILES_DIR)
+        except ValueError:
+            print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception as e:
+            print(f"Error deleting profile: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "install-boot-service":
+        service_path = args.service_path
+        service_content = sys.stdin.read()
+        try:
+            with open(service_path, "w") as f:
+                f.write(service_content)
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+            subprocess.run(["systemctl", "enable", "ruv-boot.service"], check=True)
+        except Exception as e:
+            print(f"Error installing boot service: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "remove-boot-service":
+        try:
+            subprocess.run(["systemctl", "disable", "ruv-boot.service"], check=True, capture_output=True)
+            service_path = "/etc/systemd/system/ruv-boot.service"
+            if os.path.exists(service_path):
+                os.remove(service_path)
+            subprocess.run(["systemctl", "daemon-reload"], check=True)
+        except Exception as e:
+            print(f"Error removing boot service: {e}", file=sys.stderr)
+            sys.exit(1)
         return
 
     if args.command == "list":
-        # Alias to status
         args.command = "status"
     elif args.command == "apply-file":
-        # Convert to apply by extracting profile name from file path
         json_path = Path(args.file).resolve()
         try:
             json_path.relative_to(PROFILES_DIR)
@@ -378,9 +448,8 @@ Examples:
         args.command = "apply"
         args.name = json_path.stem
     elif args.command == "apply-list":
-        # Directly apply offsets to listed cores (no profile involved)
         if not RyzenSMU.driver_loaded():
-            print("Error: Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu", file=sys.stderr)
+            print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
             sys.exit(1)
         smu = RyzenSMU()
         physical_cores = get_physical_core_ids()
@@ -398,17 +467,166 @@ Examples:
             sys.exit(1)
         return
 
-    # Commands that don't require driver
-    if args.command == "profile" and args.profile_cmd in ("list", "delete", "update", "save"):
-        handle_profile_command(args)
-        return
-    if args.command == "boot":
-        handle_boot_command(args)
+    if args.command == "profile":
+        if args.profile_cmd == "list":
+            try:
+                if PROFILES_DIR.exists():
+                    profiles = [p.stem for p in PROFILES_DIR.glob("*.json")]
+                    if profiles:
+                        print("\n".join(sorted(profiles)))
+                    else:
+                        print("No profiles found.")
+                else:
+                    print("No profiles directory exists.")
+            except Exception as e:
+                print(f"Error listing profiles: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif args.profile_cmd == "save":
+            name = args.name.strip()
+            if not re.match(r'^[a-zA-Z0-9_.-]+$', name):
+                print("Invalid profile name.", file=sys.stderr)
+                sys.exit(1)
+            if not RyzenSMU.driver_loaded():
+                print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
+                sys.exit(1)
+            smu = RyzenSMU()
+            physical_cores = get_physical_core_ids()
+            offsets = {core: smu.get_core_offset(core) for core in physical_cores}
+            PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+            json_path = PROFILES_DIR / f"{name}.json"
+            try:
+                with open(json_path, "w") as f:
+                    json.dump(offsets, f, indent=2)
+                print(f"Profile '{name}' saved.")
+            except Exception as e:
+                print(f"Error saving profile: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif args.profile_cmd == "delete":
+            name = args.name.strip()
+            json_path = PROFILES_DIR / f"{name}.json"
+            if not json_path.is_file():
+                print(f"Profile '{name}' does not exist.", file=sys.stderr)
+                sys.exit(1)
+            response = input(f"Delete profile '{name}' and reset offsets? [y/N] ")
+            if response.lower() != 'y':
+                print("Cancelled.")
+                return
+            try:
+                json_path.unlink()
+                if RyzenSMU.driver_loaded():
+                    smu = RyzenSMU()
+                    smu.reset_all_offsets()
+                    print(f"Profile '{name}' deleted and offsets reset.")
+                else:
+                    print(f"Profile '{name}' deleted.")
+            except Exception as e:
+                print(f"Error deleting profile: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif args.profile_cmd == "update":
+            name = args.name.strip()
+            json_path = PROFILES_DIR / f"{name}.json"
+            if not json_path.is_file():
+                print(f"Profile '{name}' does not exist.", file=sys.stderr)
+                sys.exit(1)
+            physical_cores = get_physical_core_ids()
+            for core in args.cores:
+                if core not in physical_cores:
+                    print(f"Error: Core {core} does not exist.", file=sys.stderr)
+                    sys.exit(1)
+            try:
+                with open(json_path, "r") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("Invalid JSON")
+                for core in args.cores:
+                    data[str(core)] = args.offset
+                with open(json_path, "w") as f:
+                    json.dump(data, f, indent=2)
+                print(f"Profile '{name}' updated.")
+                if args.apply:
+                    if not RyzenSMU.driver_loaded():
+                        print("Warning: Driver not loaded.", file=sys.stderr)
+                    else:
+                        smu = RyzenSMU()
+                        for core in args.cores:
+                            smu.set_core_offset(core, args.offset)
+                        print("Applied to CPU.")
+            except Exception as e:
+                print(f"Error updating profile: {e}", file=sys.stderr)
+                sys.exit(1)
         return
 
-    # All other commands need the driver
+    if args.command == "boot":
+        if args.boot_cmd == "enable":
+            name = args.name.strip()
+            json_path = PROFILES_DIR / f"{name}.json"
+            if not json_path.is_file():
+                print(f"Error: Profile '{name}' does not exist.", file=sys.stderr)
+                sys.exit(1)
+            service_content = f"""[Unit]
+Description=Apply Ryzen undervolt profile '{name}'
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 {INSTALLED_BIN_PATH} -- apply-file {json_path}
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+"""
+            service_path = "/etc/systemd/system/ruv-boot.service"
+            try:
+                with open(service_path, "w") as f:
+                    f.write(service_content)
+                subprocess.run(["systemctl", "daemon-reload"], check=True)
+                subprocess.run(["systemctl", "enable", "ruv-boot.service"], check=True)
+                print(f"Boot service enabled with profile '{name}'.")
+            except PermissionError:
+                print("Permission denied. Run with sudo.", file=sys.stderr)
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif args.boot_cmd == "disable":
+            try:
+                subprocess.run(["systemctl", "disable", "ruv-boot.service"], check=True, capture_output=True)
+                service_path = "/etc/systemd/system/ruv-boot.service"
+                if os.path.exists(service_path):
+                    os.remove(service_path)
+                subprocess.run(["systemctl", "daemon-reload"], check=True)
+                print("Boot service disabled.")
+            except PermissionError:
+                print("Permission denied. Run with sudo.", file=sys.stderr)
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+        elif args.boot_cmd == "status":
+            try:
+                result = subprocess.run(["systemctl", "is-enabled", "ruv-boot.service"],
+                                        capture_output=True, text=True)
+                enabled = result.stdout.strip()
+                if enabled == "enabled":
+                    try:
+                        with open("/etc/systemd/system/ruv-boot.service", "r") as f:
+                            content = f.read()
+                            match = re.search(r"apply-file\s+(\S+)", content)
+                            profile = match.group(1) if match else "unknown"
+                        print(f"Boot service ENABLED (profile: {profile})")
+                    except:
+                        print("Boot service ENABLED")
+                elif enabled == "disabled":
+                    print("Boot service disabled")
+                else:
+                    print("Boot service not installed")
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+        return
+
     if not RyzenSMU.driver_loaded():
-        print("Error: Ryzen SMU driver not loaded. Load it with: sudo modprobe ryzen_smu", file=sys.stderr)
+        print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
         sys.exit(1)
 
     smu = RyzenSMU()
@@ -459,7 +677,7 @@ Examples:
                 for err in failed:
                     print(f"  {err}", file=sys.stderr)
                 sys.exit(1)
-            print(f"Profile '{args.name}' applied successfully. Current offsets:")
+            print(f"Profile '{args.name}' applied.")
             for core in physical_cores:
                 print(f"Core {core}: {smu.get_core_offset(core)} mV")
         elif args.command == "reset":
@@ -472,217 +690,18 @@ Examples:
         sys.exit(1)
 
 
-def _legacy_read_profile(file_path: str):
-    """Internal command used by GUI to read a profile file."""
-    path = Path(file_path).resolve()
-    try:
-        path.relative_to(PROFILES_DIR)
-    except ValueError:
-        print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
-        sys.exit(1)
-    try:
-        with open(path, "r") as f:
-            print(f.read(), end="")
-    except Exception as e:
-        print(f"Error reading profile: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def handle_profile_command(args):
-    """Handle all profile subcommands (CLI only, no pkexec)."""
-    if args.profile_cmd == "list":
-        try:
-            if PROFILES_DIR.exists():
-                profiles = [p.stem for p in PROFILES_DIR.glob("*.json")]
-                if profiles:
-                    print("\n".join(sorted(profiles)))
-                else:
-                    print("No profiles found.")
-            else:
-                print("No profiles directory exists.")
-        except Exception as e:
-            print(f"Error listing profiles: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.profile_cmd == "save":
-        name = args.name.strip()
-        if not re.match(r'^[a-zA-Z0-9_.-]+$', name):
-            print("Invalid profile name. Use only letters, numbers, underscore, hyphen, and dot.", file=sys.stderr)
-            sys.exit(1)
-
-        if not RyzenSMU.driver_loaded():
-            print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
-            sys.exit(1)
-
-        smu = RyzenSMU()
-        physical_cores = get_physical_core_ids()
-        offsets = {core: smu.get_core_offset(core) for core in physical_cores}
-
-        PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        json_path = PROFILES_DIR / f"{name}.json"
-        try:
-            with open(json_path, "w") as f:
-                json.dump(offsets, f, indent=2)
-            print(f"Profile '{name}' saved with current offsets.")
-        except Exception as e:
-            print(f"Error saving profile: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.profile_cmd == "delete":
-        name = args.name.strip()
-        json_path = PROFILES_DIR / f"{name}.json"
-        if not json_path.is_file():
-            print(f"Profile '{name}' does not exist.", file=sys.stderr)
-            sys.exit(1)
-
-        # Confirm deletion
-        response = input(f"Delete profile '{name}' and reset all offsets to 0? [y/N] ")
-        if response.lower() != 'y':
-            print("Cancelled.")
-            return
-
-        try:
-            json_path.unlink()
-            # Also reset offsets if driver is loaded
-            if RyzenSMU.driver_loaded():
-                smu = RyzenSMU()
-                smu.reset_all_offsets()
-                print(f"Profile '{name}' deleted and offsets reset.")
-            else:
-                print(f"Profile '{name}' deleted (driver not loaded, offsets unchanged).")
-        except Exception as e:
-            print(f"Error deleting profile: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.profile_cmd == "update":
-        name = args.name.strip()
-        json_path = PROFILES_DIR / f"{name}.json"
-        if not json_path.is_file():
-            print(f"Profile '{name}' does not exist.", file=sys.stderr)
-            sys.exit(1)
-
-        # Validate core IDs against actual hardware
-        physical_cores = get_physical_core_ids()
-        for core in args.cores:
-            if core not in physical_cores:
-                print(f"Error: Core {core} does not exist on this system.", file=sys.stderr)
-                sys.exit(1)
-
-        try:
-            with open(json_path, "r") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("Profile JSON is not a dictionary")
-
-            for core in args.cores:
-                data[str(core)] = args.offset
-
-            with open(json_path, "w") as f:
-                json.dump(data, f, indent=2)
-
-            print(f"Profile '{name}' updated: cores {args.cores} set to {args.offset} mV.")
-
-            if args.apply:
-                if not RyzenSMU.driver_loaded():
-                    print("Warning: Driver not loaded, cannot apply live.", file=sys.stderr)
-                else:
-                    smu = RyzenSMU()
-                    for core in args.cores:
-                        smu.set_core_offset(core, args.offset)
-                    print("Updated offsets applied to CPU.")
-        except Exception as e:
-            print(f"Error updating profile: {e}", file=sys.stderr)
-            sys.exit(1)
-
-
-def handle_boot_command(args):
-    """Handle all boot subcommands (CLI only, no pkexec)."""
-    if args.boot_cmd == "enable":
-        name = args.name.strip()
-        json_path = PROFILES_DIR / f"{name}.json"
-        if not json_path.is_file():
-            print(f"Error: Profile '{name}' does not exist.", file=sys.stderr)
-            sys.exit(1)
-
-        service_content = f"""[Unit]
-Description=Apply Ryzen undervolt profile '{name}'
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/env python3 {INSTALLED_BIN_PATH} -- apply {name}
-RemainAfterExit=no
-
-[Install]
-WantedBy=multi-user.target
-"""
-        service_path = "/etc/systemd/system/ruv-boot.service"
-        try:
-            # Write service file (requires root)
-            with open(service_path, "w") as f:
-                f.write(service_content)
-            subprocess.run(["systemctl", "daemon-reload"], check=True)
-            subprocess.run(["systemctl", "enable", "ruv-boot.service"], check=True)
-            print(f"Boot service enabled with profile '{name}'.")
-        except PermissionError:
-            print("Error: Permission denied. Run with sudo to manage boot service.", file=sys.stderr)
-            sys.exit(1)
-        except subprocess.CalledProcessError as e:
-            print(f"Error enabling boot service: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.boot_cmd == "disable":
-        try:
-            subprocess.run(["systemctl", "disable", "ruv-boot.service"],
-                           check=True, capture_output=True)
-            service_path = "/etc/systemd/system/ruv-boot.service"
-            if os.path.exists(service_path):
-                os.remove(service_path)
-            subprocess.run(["systemctl", "daemon-reload"], check=True)
-            print("Boot service disabled and removed.")
-        except PermissionError:
-            print("Error: Permission denied. Run with sudo to manage boot service.", file=sys.stderr)
-            sys.exit(1)
-        except subprocess.CalledProcessError as e:
-            print(f"Error disabling boot service: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.boot_cmd == "status":
-        try:
-            result = subprocess.run(["systemctl", "is-enabled", "ruv-boot.service"],
-                                    capture_output=True, text=True)
-            enabled = result.stdout.strip()
-            if enabled == "enabled":
-                # Get the profile name from the service file
-                try:
-                    with open("/etc/systemd/system/ruv-boot.service", "r") as f:
-                        content = f.read()
-                        match = re.search(r"apply (\S+)", content)
-                        profile = match.group(1) if match else "unknown"
-                    print(f"Boot service is ENABLED (profile: {profile})")
-                except:
-                    print("Boot service is ENABLED (profile unknown)")
-            elif enabled == "disabled":
-                print("Boot service is disabled")
-            else:
-                print("Boot service not installed")
-        except Exception as e:
-            print(f"Error checking boot status: {e}", file=sys.stderr)
-            sys.exit(1)
-
-
 class WorkerThread(QThread):
-    """Background thread for running privileged commands without freezing the GUI."""
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, args: List[str]):
+    def __init__(self, args: List[str], input_text: Optional[str] = None):
         super().__init__()
         self.args = args
+        self.input_text = input_text
 
     def run(self):
         try:
-            output = PrivilegedRunner.run(self.args)
+            output = PrivilegedRunner.run(self.args, self.input_text)
             self.finished.emit(output)
         except Exception as e:
             self.error.emit(str(e))
@@ -717,9 +736,8 @@ class MainWindow(QMainWindow):
         self._set_window_icon()
 
         self.core_ids = get_physical_core_ids() or list(range(8))
-        logger.debug(f"MainWindow core IDs: {self.core_ids}")
-
-        self.workers = []  # Keep references to prevent garbage collection
+        self.workers = []
+        self._busy = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -803,7 +821,6 @@ class MainWindow(QMainWindow):
         self.output.setMaximumHeight(150)
         main_layout.addWidget(self.output)
 
-        # Connect signals
         self.btn_list.clicked.connect(self.list_offsets)
         self.btn_reset.clicked.connect(self.reset_offsets)
         self.btn_apply.clicked.connect(self.apply_offset)
@@ -824,42 +841,74 @@ class MainWindow(QMainWindow):
         if not icon.isNull():
             self.setWindowIcon(icon)
 
-    def _cleanup_workers(self):
-        """Remove finished workers from the list."""
-        self.workers = [w for w in self.workers if w.isRunning()]
-
-    def _run_privileged_async(self, args: List[str], on_finish, on_error=None):
-        """Run a privileged command in a background thread."""
-        self._cleanup_workers()
-        worker = WorkerThread(args)
-        worker.finished.connect(on_finish)
-        if on_error:
-            worker.error.connect(on_error)
+    def _set_busy(self, busy: bool):
+        self._busy = busy
+        widgets = [
+            self.btn_apply, self.btn_list, self.btn_reset,
+            self.btn_save_profile, self.btn_delete_profile,
+            self.btn_apply_profile, self.btn_update_profile,
+            self.btn_set_boot, self.btn_remove_boot,
+            self.profile_combo, self.offset_spin, self.core_list
+        ]
+        for w in widgets:
+            w.setEnabled(not busy)
+        if busy:
+            QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
         else:
-            worker.error.connect(lambda e: self.output.setText(f"Error: {e}"))
-        # Clean up worker list when thread finishes
-        worker.finished.connect(lambda: self._cleanup_workers())
-        worker.error.connect(lambda: self._cleanup_workers())
+            QApplication.restoreOverrideCursor()
+
+    def _cleanup_worker(self, worker):
+        if worker in self.workers:
+            self.workers.remove(worker)
+        if not self.workers:
+            self._set_busy(False)
+
+    def _run_privileged_async(self, args: List[str], on_finish,
+                              on_error=None, input_text: Optional[str] = None):
+        self._set_busy(True)
+        worker = WorkerThread(args, input_text)
+
+        def handle_finish(output):
+            try:
+                on_finish(output)
+            except Exception as e:
+                self.output.setText(f"Error in callback: {e}")
+            finally:
+                self._cleanup_worker(worker)
+
+        def handle_error(err):
+            try:
+                if on_error:
+                    on_error(err)
+                else:
+                    self.output.setText(f"Error: {err}")
+            except Exception as e:
+                self.output.setText(f"Error in error handler: {e}")
+            finally:
+                self._cleanup_worker(worker)
+
+        worker.finished.connect(handle_finish)
+        worker.error.connect(handle_error)
         self.workers.append(worker)
         worker.start()
 
     def list_offsets(self):
         def on_finish(output):
             self.output.setText(output)
-        self._run_privileged_async(["list"], on_finish)   # legacy alias still works
+        self._run_privileged_async(["list"], on_finish)
 
     def reset_offsets(self):
         def on_finish(output):
             self.output.setText(output)
+            self.offset_spin.setValue(0)
         self._run_privileged_async(["reset"], on_finish)
 
     def apply_offset(self):
         selected_cores = self.core_list.get_selected_cores()
         if not selected_cores:
-            self.output.setText("No cores selected. Please tick at least one core.")
+            self.output.setText("No cores selected.")
             return
         offset = self.offset_spin.value()
-
         args = ["apply-list"] + [str(c) for c in selected_cores] + [str(offset)]
         def on_finish(output):
             self.output.setText(output)
@@ -881,27 +930,28 @@ class MainWindow(QMainWindow):
             return
         name = name.strip()
         if not re.match(r'^[a-zA-Z0-9_.-]+$', name):
-            self.output.setText("Invalid profile name. Use only letters, numbers, underscore, hyphen, and dot.")
+            self.output.setText("Invalid profile name.")
             return
 
-        json_path = PROFILES_DIR / f"{name}.json"
-        script = str(SCRIPT_PATH)
-        python = sys.executable
-        cmd = [
-            "pkexec", "bash", "-c",
-            f"mkdir -p {PROFILES_DIR} && {python} {script} -- list --json > {json_path}"
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.strip())
-            self.output.setText(f"Profile '{name}' saved successfully.")
-            self.refresh_profile_list()
-            index = self.profile_combo.findText(name)
-            if index >= 0:
-                self.profile_combo.setCurrentIndex(index)
-        except Exception as e:
-            self.output.setText(f"Error saving profile: {e}")
+        def on_get_offsets(output):
+            try:
+                offsets = json.loads(output)
+                json_text = json.dumps(offsets, indent=2)
+                json_path = PROFILES_DIR / f"{name}.json"
+                def on_write_finished(msg):
+                    self.output.setText(f"Profile '{name}' saved.")
+                    self.refresh_profile_list()
+                    index = self.profile_combo.findText(name)
+                    if index >= 0:
+                        self.profile_combo.setCurrentIndex(index)
+                self._run_privileged_async(
+                    ["write-profile", str(json_path)],
+                    on_write_finished,
+                    input_text=json_text
+                )
+            except Exception as e:
+                self.output.setText(f"Error: {e}")
+        self._run_privileged_async(["list", "--json"], on_get_offsets)
 
     def delete_profile(self):
         name = self.profile_combo.currentText()
@@ -909,26 +959,18 @@ class MainWindow(QMainWindow):
             return
         reply = QMessageBox.question(
             self, "Delete Profile",
-            f"Delete profile '{name}'? This will also reset all core offsets to 0.",
+            f"Delete profile '{name}' and reset offsets?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        try:
-            json_path = PROFILES_DIR / f"{name}.json"
-            script = str(SCRIPT_PATH)
-            python = sys.executable
-            cmd = [
-                "pkexec", "bash", "-c",
-                f"rm -f {json_path} && {python} {script} -- reset"
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.strip())
-            self.output.setText(f"Profile '{name}' deleted and all offsets reset to 0.\n{result.stdout}")
-            self.refresh_profile_list()
-        except Exception as e:
-            self.output.setText(f"Error deleting profile: {e}")
+        json_path = PROFILES_DIR / f"{name}.json"
+        def on_reset_done(_):
+            def on_delete_done(msg):
+                self.output.setText(f"Profile '{name}' deleted.")
+                self.refresh_profile_list()
+            self._run_privileged_async(["delete-profile-file", str(json_path)], on_delete_done)
+        self._run_privileged_async(["reset"], on_reset_done)
 
     def apply_profile(self):
         name = self.profile_combo.currentText()
@@ -937,65 +979,61 @@ class MainWindow(QMainWindow):
             return
         json_path = PROFILES_DIR / f"{name}.json"
         if not json_path.exists():
-            self.output.setText(f"Profile file {json_path} not found.")
+            self.output.setText(f"Profile file not found.")
             return
         def on_finish(output):
             self.output.setText(output)
-        self._run_privileged_async(["apply-file", str(json_path)], on_finish)   # legacy alias
+        self._run_privileged_async(["apply-file", str(json_path)], on_finish)
 
     def update_profile(self):
         name = self.profile_combo.currentText()
         if not name:
             self.output.setText("No profile selected.")
             return
-
         selected_cores = self.core_list.get_selected_cores()
         if not selected_cores:
-            self.output.setText("No cores selected. Please tick at least one core to update.")
+            self.output.setText("No cores selected.")
             return
-
         new_offset = self.offset_spin.value()
-
         json_path = PROFILES_DIR / f"{name}.json"
         if not json_path.exists():
-            self.output.setText(f"Profile '{name}' does not exist (file missing).")
+            self.output.setText(f"Profile does not exist.")
             return
 
-        try:
-            raw_json = PrivilegedRunner.run(["read-profile", str(json_path)])   # legacy internal
+        def on_read_profile(raw_json):
             try:
                 profile_data = json.loads(raw_json)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON in profile: {e}")
+                if not isinstance(profile_data, dict):
+                    raise ValueError("Invalid JSON")
+                for core in selected_cores:
+                    profile_data[str(core)] = new_offset
+                json_text = json.dumps(profile_data, indent=2)
 
-            if not isinstance(profile_data, dict):
-                raise ValueError("Profile JSON is not a dictionary")
+                def on_write_done(msg):
+                    reply = QMessageBox.question(
+                        self, "Apply Updated Profile",
+                        f"Profile '{name}' updated. Apply to CPU now?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
+                        def on_apply_done(output):
+                            self.output.setText(f"Profile updated and applied.\n{output}")
+                            self.offset_spin.setValue(0)
+                        self._run_privileged_async(["apply-file", str(json_path)], on_apply_done)
+                    else:
+                        self.output.setText(f"Profile '{name}' updated (not applied).")
+                        self.offset_spin.setValue(0)
 
-            for core in selected_cores:
-                profile_data[str(core)] = new_offset
+                self._run_privileged_async(
+                    ["write-profile", str(json_path)],
+                    on_write_done,
+                    input_text=json_text
+                )
+            except Exception as e:
+                self.output.setText(f"Error: {e}")
 
-            json_text = json.dumps(profile_data, indent=2)
-            write_cmd = ["pkexec", "tee", str(json_path)]
-            write_result = subprocess.run(write_cmd, input=json_text, text=True, capture_output=True)
-            if write_result.returncode != 0:
-                raise RuntimeError(f"Failed to write profile: {write_result.stderr.strip()}")
-
-            apply_reply = QMessageBox.question(
-                self, "Apply Updated Profile",
-                f"Profile '{name}' updated.\nDo you want to apply it to the CPU now?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
-            )
-            if apply_reply == QMessageBox.StandardButton.Yes:
-                def on_finish(output):
-                    self.output.setText(f"Profile updated and applied.\n{output}")
-                self._run_privileged_async(["apply-file", str(json_path)], on_finish)   # legacy alias
-            else:
-                self.output.setText(f"Profile '{name}' updated (not applied live).")
-            self.offset_spin.setValue(0)
-
-        except Exception as e:
-            self.output.setText(f"Error updating profile: {e}")
+        self._run_privileged_async(["read-profile", str(json_path)], on_read_profile)
 
     def set_as_boot_profile(self):
         name = self.profile_combo.currentText()
@@ -1004,9 +1042,8 @@ class MainWindow(QMainWindow):
             return
         json_path = PROFILES_DIR / f"{name}.json"
         if not json_path.exists():
-            self.output.setText(f"Profile '{name}' does not exist (file missing).")
+            self.output.setText(f"Profile does not exist.")
             return
-
         service_content = f"""[Unit]
 Description=Apply Ryzen undervolt profile '{name}'
 After=multi-user.target
@@ -1020,43 +1057,25 @@ RemainAfterExit=no
 WantedBy=multi-user.target
 """
         service_path = "/etc/systemd/system/ruv-boot.service"
-        try:
-            cmd = [
-                "pkexec", "bash", "-c",
-                f"cat > {service_path} <<'EOF'\n{service_content}\nEOF\n"
-                f"systemctl daemon-reload && systemctl enable ruv-boot.service"
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.strip())
-
-            self.output.setText(
-                f"Boot service installed with profile '{name}'.\n"
-                f"Profile will be applied automatically at next boot.\n"
-                f"To remove the service, use 'Remove Boot Service' button."
-            )
-        except Exception as e:
-            self.output.setText(f"Error installing boot service: {e}")
+        def on_done(msg):
+            self.output.setText(f"Boot service installed with profile '{name}'.")
+        self._run_privileged_async(
+            ["install-boot-service", service_path],
+            on_done,
+            input_text=service_content
+        )
 
     def remove_boot_service(self):
         reply = QMessageBox.question(
             self, "Remove Boot Service",
-            "Remove the boot service? This will stop automatic offset loading at startup.",
+            "Remove the boot service?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        try:
-            cmd = [
-                "pkexec", "bash", "-c",
-                "systemctl disable ruv-boot.service && rm -f /etc/systemd/system/ruv-boot.service && systemctl daemon-reload"
-            ]
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            self.output.setText("Boot service removed successfully.")
-        except subprocess.CalledProcessError as e:
-            self.output.setText(f"Error removing boot service: {e.stderr if e.stderr else str(e)}")
-        except Exception as e:
-            self.output.setText(f"Error removing boot service: {e}")
+        def on_done(msg):
+            self.output.setText("Boot service removed.")
+        self._run_privileged_async(["remove-boot-service"], on_done)
 
 
 if __name__ == "__main__":
