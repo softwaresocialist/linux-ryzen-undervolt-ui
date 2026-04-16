@@ -25,11 +25,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QIcon, QCursor
 
+# Debug logging always enabled
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ruv")
-if os.environ.get("RUV_DEBUG"):
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-else:
-    logging.basicConfig(level=logging.WARNING)
 
 SCRIPT_PATH = Path(__file__).resolve()
 INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"
@@ -295,7 +293,7 @@ Examples:
   sudo ruv reset                  Reset all offsets to 0
         """
     )
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)  # kept for compatibility, ignored
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     status_parser = subparsers.add_parser("status", help="Show current core voltage offsets")
@@ -330,7 +328,6 @@ Examples:
     delete_profile_file_parser = subparsers.add_parser("delete-profile-file", help=argparse.SUPPRESS)
     delete_profile_file_parser.add_argument("file", type=str)
 
-    # New combined command for saving a profile directly from offsets JSON
     save_profile_combined = subparsers.add_parser("save-profile-combined", help=argparse.SUPPRESS)
     save_profile_combined.add_argument("name", help="Profile name")
 
@@ -364,8 +361,8 @@ Examples:
 
     args = parser.parse_args(cli_args)
 
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Debug is always on, so we ignore the --debug flag
+    # (kept for backward compatibility)
 
     if args.command == "read-profile":
         path = Path(args.file).resolve()
@@ -930,7 +927,6 @@ class MainWindow(QMainWindow):
         worker.error.connect(handle_error)
         self.workers.append(worker)
 
-        # Failsafe: force cleanup if worker never finishes
         QTimer.singleShot(10000, lambda w=worker: self._force_cleanup_if_stuck(w))
 
         worker.start()
@@ -1001,29 +997,18 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         json_path = PROFILES_DIR / f"{name}.json"
-        def on_finish(output):
-            self.output.setText(output)
-            self.refresh_profile_list()
-        # Single combined command: reset offsets and delete file
-        def combined_operation():
-            try:
-                # Reset offsets
-                PrivilegedRunner.run(["reset"])
-                # Delete file
-                PrivilegedRunner.run(["delete-profile-file", str(json_path)])
-                return f"Profile '{name}' deleted and offsets reset."
-            except Exception as e:
-                raise RuntimeError(f"Failed to delete profile: {e}")
-        # We'll run this in a thread
+
         class CombinedWorker(QThread):
             finished = pyqtSignal(str)
             error = pyqtSignal(str)
             def run(self):
                 try:
-                    msg = combined_operation()
-                    self.finished.emit(msg)
+                    PrivilegedRunner.run(["reset"])
+                    PrivilegedRunner.run(["delete-profile-file", str(json_path)])
+                    self.finished.emit(f"Profile '{name}' deleted and offsets reset.")
                 except Exception as e:
                     self.error.emit(str(e))
+
         self._set_busy(True)
         worker = CombinedWorker()
         def on_done(msg):
