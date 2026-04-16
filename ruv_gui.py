@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QInputDialog, QListWidget,
     QListWidgetItem, QAbstractItemView, QSplitter
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QIcon, QCursor
 
 logger = logging.getLogger("ruv")
@@ -330,6 +330,10 @@ Examples:
     delete_profile_file_parser = subparsers.add_parser("delete-profile-file", help=argparse.SUPPRESS)
     delete_profile_file_parser.add_argument("file", type=str)
 
+    # New combined command for saving a profile directly from offsets JSON
+    save_profile_combined = subparsers.add_parser("save-profile-combined", help=argparse.SUPPRESS)
+    save_profile_combined.add_argument("name", help="Profile name")
+
     install_boot_service_parser = subparsers.add_parser("install-boot-service", help=argparse.SUPPRESS)
     install_boot_service_parser.add_argument("service_path", type=str)
 
@@ -408,6 +412,28 @@ Examples:
                 path.unlink()
         except Exception as e:
             print(f"Error deleting profile: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "save-profile-combined":
+        name = args.name.strip()
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', name):
+            print("Invalid profile name.", file=sys.stderr)
+            sys.exit(1)
+        if not RyzenSMU.driver_loaded():
+            print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
+            sys.exit(1)
+        smu = RyzenSMU()
+        physical_cores = get_physical_core_ids()
+        offsets = {core: smu.get_core_offset(core) for core in physical_cores}
+        PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+        json_path = PROFILES_DIR / f"{name}.json"
+        try:
+            with open(json_path, "w") as f:
+                json.dump(offsets, f, indent=2)
+            print(f"Profile '{name}' saved.")
+        except Exception as e:
+            print(f"Error saving profile: {e}", file=sys.stderr)
             sys.exit(1)
         return
 
@@ -700,11 +726,13 @@ class WorkerThread(QThread):
         self.input_text = input_text
 
     def run(self):
+        logger.debug("WorkerThread started")
         try:
             output = PrivilegedRunner.run(self.args, self.input_text)
             self.finished.emit(output)
         except Exception as e:
             self.error.emit(str(e))
+        logger.debug("WorkerThread finished")
 
 
 class CoreSelectionList(QListWidget):
@@ -842,6 +870,8 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(icon)
 
     def _set_busy(self, busy: bool):
+        if self._busy == busy:
+            return
         self._busy = busy
         widgets = [
             self.btn_apply, self.btn_list, self.btn_reset,
@@ -854,10 +884,13 @@ class MainWindow(QMainWindow):
             w.setEnabled(not busy)
         if busy:
             QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+            logger.debug("Cursor override set")
         else:
             QApplication.restoreOverrideCursor()
+            logger.debug("Cursor override restored")
 
-    def _cleanup_worker(self, worker):
+    def _worker_cleanup(self, worker):
+        logger.debug(f"Worker cleanup called for {worker}")
         if worker in self.workers:
             self.workers.remove(worker)
         if not self.workers:
@@ -865,32 +898,47 @@ class MainWindow(QMainWindow):
 
     def _run_privileged_async(self, args: List[str], on_finish,
                               on_error=None, input_text: Optional[str] = None):
-        self._set_busy(True)
+        if not self.workers:
+            self._set_busy(True)
         worker = WorkerThread(args, input_text)
+        logger.debug(f"Created worker {worker} for args {args}")
 
         def handle_finish(output):
+            logger.debug(f"Worker finished successfully")
             try:
                 on_finish(output)
             except Exception as e:
+                logger.error(f"Error in finished callback: {e}")
                 self.output.setText(f"Error in callback: {e}")
             finally:
-                self._cleanup_worker(worker)
+                self._worker_cleanup(worker)
 
         def handle_error(err):
+            logger.debug(f"Worker error: {err}")
             try:
                 if on_error:
                     on_error(err)
                 else:
                     self.output.setText(f"Error: {err}")
             except Exception as e:
+                logger.error(f"Error in error callback: {e}")
                 self.output.setText(f"Error in error handler: {e}")
             finally:
-                self._cleanup_worker(worker)
+                self._worker_cleanup(worker)
 
         worker.finished.connect(handle_finish)
         worker.error.connect(handle_error)
         self.workers.append(worker)
+
+        # Failsafe: force cleanup if worker never finishes
+        QTimer.singleShot(10000, lambda w=worker: self._force_cleanup_if_stuck(w))
+
         worker.start()
+
+    def _force_cleanup_if_stuck(self, worker):
+        if worker in self.workers:
+            logger.warning(f"Worker {worker} timed out, forcing cleanup")
+            self._worker_cleanup(worker)
 
     def list_offsets(self):
         def on_finish(output):
@@ -933,25 +981,13 @@ class MainWindow(QMainWindow):
             self.output.setText("Invalid profile name.")
             return
 
-        def on_get_offsets(output):
-            try:
-                offsets = json.loads(output)
-                json_text = json.dumps(offsets, indent=2)
-                json_path = PROFILES_DIR / f"{name}.json"
-                def on_write_finished(msg):
-                    self.output.setText(f"Profile '{name}' saved.")
-                    self.refresh_profile_list()
-                    index = self.profile_combo.findText(name)
-                    if index >= 0:
-                        self.profile_combo.setCurrentIndex(index)
-                self._run_privileged_async(
-                    ["write-profile", str(json_path)],
-                    on_write_finished,
-                    input_text=json_text
-                )
-            except Exception as e:
-                self.output.setText(f"Error: {e}")
-        self._run_privileged_async(["list", "--json"], on_get_offsets)
+        def on_finish(output):
+            self.output.setText(output)
+            self.refresh_profile_list()
+            index = self.profile_combo.findText(name)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+        self._run_privileged_async(["save-profile-combined", name], on_finish)
 
     def delete_profile(self):
         name = self.profile_combo.currentText()
@@ -965,12 +1001,42 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         json_path = PROFILES_DIR / f"{name}.json"
-        def on_reset_done(_):
-            def on_delete_done(msg):
-                self.output.setText(f"Profile '{name}' deleted.")
-                self.refresh_profile_list()
-            self._run_privileged_async(["delete-profile-file", str(json_path)], on_delete_done)
-        self._run_privileged_async(["reset"], on_reset_done)
+        def on_finish(output):
+            self.output.setText(output)
+            self.refresh_profile_list()
+        # Single combined command: reset offsets and delete file
+        def combined_operation():
+            try:
+                # Reset offsets
+                PrivilegedRunner.run(["reset"])
+                # Delete file
+                PrivilegedRunner.run(["delete-profile-file", str(json_path)])
+                return f"Profile '{name}' deleted and offsets reset."
+            except Exception as e:
+                raise RuntimeError(f"Failed to delete profile: {e}")
+        # We'll run this in a thread
+        class CombinedWorker(QThread):
+            finished = pyqtSignal(str)
+            error = pyqtSignal(str)
+            def run(self):
+                try:
+                    msg = combined_operation()
+                    self.finished.emit(msg)
+                except Exception as e:
+                    self.error.emit(str(e))
+        self._set_busy(True)
+        worker = CombinedWorker()
+        def on_done(msg):
+            self.output.setText(msg)
+            self.refresh_profile_list()
+            self._set_busy(False)
+        def on_err(err):
+            self.output.setText(f"Error: {err}")
+            self._set_busy(False)
+        worker.finished.connect(on_done)
+        worker.error.connect(on_err)
+        worker.start()
+        self.workers.append(worker)
 
     def apply_profile(self):
         name = self.profile_combo.currentText()
