@@ -97,7 +97,7 @@ sudo ruv-gui read-profile /etc/ruv/profiles/mystable.json
 ```bash
 sudo ruv-gui boot enable <profile-name>
 ```
-### Disable boot service
+### Disable and remove boot service
 ```bash
 sudo ruv-gui boot disable
 ```
