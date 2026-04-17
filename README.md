@@ -1,4 +1,3 @@
-<img width="553" height="451" alt="Bildschirmfoto_20260417_123001-removebg-preview" src="https://github.com/user-attachments/assets/80725844-bbc8-42ed-8e36-abeda45a0136" />
 # Linux Ryzen Undervolt UI
 
 Early development – expect bugs. AI‑assisted code.
