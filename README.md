@@ -1,6 +1,6 @@
 # Linux Ryzen Undervolt UI
-
 Early development – expect bugs. AI‑assisted code.
+<img width="798" height="625" alt="Bildschirmfoto_20260417_123451" src="https://github.com/user-attachments/assets/31f787ec-7684-4846-bdc6-bc6ef26d8bed" />
 ## What is it?
 
 Linux Undervolt Tool for Ryzen CPUs using the Ryzen SMU kernel driver.
