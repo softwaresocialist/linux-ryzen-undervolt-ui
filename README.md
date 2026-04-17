@@ -105,9 +105,5 @@ sudo ruv-gui boot disable
 ```bash
 sudo ruv-gui boot status
 ```
-### Check boot service status
-```bash
-sudo ruv-gui boot status
-```
 
 
