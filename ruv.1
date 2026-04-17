@@ -1,202 +1,123 @@
+.\" Man page for ruv – Ryzen Undervolt Tool
+.\" Format with: groff -man -Tascii ruv.1
+
 .TH RUV 1 "2026-04-17" "ruv 1.0" "User Commands"
-.
 .SH NAME
-ruv \- Ryzen Undervolt Tool – control CPU core voltage offsets on AMD Ryzen processors
-.
+ruv \- control Ryzen CPU core voltage offsets via the ryzen_smu driver
 .SH SYNOPSIS
 .B ruv
-[\fIOPTIONS\fR] \fICOMMAND\fR [\fIARGS\fR...]
-.br
-.B ruv
-(no arguments) – launch the graphical interface
-.
+.I COMMAND
+[\fIOPTIONS\fR]
 .SH DESCRIPTION
-\fBruv\fR is a tool for adjusting the per‑core voltage offset of AMD Ryzen CPUs
-that are supported by the \fBryzen_smu\fR kernel driver. Undervolting can reduce
-power consumption and temperatures without sacrificing performance, provided the
-offsets are chosen carefully.
-.P
-The program offers both a command‑line interface (ideal for scripting and remote
-use) and a Qt6 graphical application. You can save current offsets as named
-\fIprofiles\fR, apply them later, and even configure a systemd service to apply a
-profile automatically at boot.
-.P
-\fBImportant:\fR Most operations require root privileges because they access the
-SMU (System Management Unit) via the kernel driver. When you run \fBruv\fR as a
-normal user, it will attempt to elevate privileges using \fBpkexec\fR(1) – you will
-be prompted for your password.
-.
+\fBruv\fR is a command-line and graphical tool to read and set per‑core
+voltage offsets on AMD Ryzen CPUs that are supported by the
+\fBryzen_smu\fR kernel driver. It can also save and apply profiles, and
+set up a systemd service to reapply offsets at boot.
+
+When run without arguments, the graphical user interface (GUI) is launched.
+Root privileges are required for most operations; the tool uses
+\fBpkexec\fR(1) to obtain them when needed.
 .SH OPTIONS
 .TP
 \fB\-\-debug\fR
-This option is accepted for backward compatibility but has no effect; debug
-logging is always enabled.
-.
+Enable debug logging (environment variable \fBRUV_DEBUG=1\fR has the same effect).
+This option is mainly for internal use and may be suppressed in help output.
 .SH COMMANDS
-The following commands are available. Many of them can be shortened (e.g.
-\fBprofile\fR can be abbreviated as \fBprof\fR) but the full names are recommended
-for clarity.
-.
-.SS "Querying Current Offsets"
+.SS Status and Inspection
 .TP
-\fBstatus\fR
-Show the current voltage offset (in millivolts) for every physical core.
-.TP
-\fBstatus \-\-json\fR
-Same as \fBstatus\fR, but output a JSON object suitable for scripting.
+\fBstatus\fR [\fB\-\-json\fR]
+Display the current voltage offset (in mV) for each physical core.
+With \fB\-\-json\fR, output a JSON object mapping core numbers to offsets.
 .TP
 \fBget\fR \fICORE\fR
-Print the offset of a single core (e.g. \fBget 2\fR).
-.
-.SS "Modifying Offsets"
+Print the current offset of a single core.
+.TP
+\fBlist\fR
+Alias for \fBstatus\fR (provided for internal compatibility).
+.SS Modifying Offsets
 .TP
 \fBset\fR \fICORE\fR \fIOFFSET\fR
-Set the offset of \fICORE\fR to \fIOFFSET\fR millivolts. The allowed range is \-100
-to +100 mV.
-.RS
-.P
-\fBExample:\fR \fBsudo ruv set 3 \-40\fR
-.RE
+Set the offset of \fICORE\fR to \fIOFFSET\fR mV.
+Valid offsets are between \-100 and +100 mV.
 .TP
 \fBreset\fR
-Reset \fIall\fR cores back to 0 mV (no offset).
-.
-.SS "Working with Profiles"
-Profiles are stored as JSON files in \fI/etc/ruv/profiles/\fR. A profile is simply
-a mapping from core number to offset value.
-.TP
-\fBapply\fR \fINAME\fR
-Apply a saved profile by its name (the \fB.json\fR extension is not included).
-.RS
-.P
-\fBExample:\fR \fBsudo ruv apply daily\fR
-.RE
+Reset all core offsets to 0 mV.
+.SS Profile Management
+Profiles are stored as JSON files under \fI/etc/ruv/profiles/\fR.
 .TP
 \fBprofile list\fR
-Show all available profile names.
+List all saved profile names.
 .TP
 \fBprofile save\fR \fINAME\fR
-Capture the current offsets and save them as a new profile. The name may only
-contain letters, numbers, underscore, hyphen, and dot.
-.RS
-.P
-\fBExample:\fR \fBsudo ruv profile save stable\fR
-.RE
+Save the currently active offsets as a new profile named \fINAME\fR.
+Profile names may contain letters, digits, underscores, hyphens, and dots.
 .TP
 \fBprofile delete\fR \fINAME\fR
-Delete the named profile. You will be asked for confirmation, and the tool will
-also reset all live offsets to 0 (because the profile is removed).
+Delete the profile \fINAME\fR and optionally reset all offsets to 0
+(interactive confirmation).
 .TP
 \fBprofile update\fR \fINAME\fR \fB\-\-cores\fR \fICORE\fR... \fB\-\-offset\fR \fIOFFSET\fR [\fB\-\-apply\fR]
-Modify an existing profile by changing the offset for one or more specific cores.
-With the \fB\-\-apply\fR flag, the changes are also applied to the running CPU
+Update the offsets of specific cores inside an existing profile.
+If \fB\-\-apply\fR is given, the new offsets are also applied to the CPU
 immediately.
-.RS
-.P
-\fBExample:\fR \fBsudo ruv profile update gaming \-\-cores 0 2 4 \-\-offset \-50 \-\-apply\fR
-.RE
-.
-.SS "Boot Service"
-You can instruct \fBruv\fR to apply a profile every time the system starts. This
-is done by creating a systemd service.
+.TP
+\fBapply\fR \fINAME\fR
+Apply the offsets stored in profile \fINAME\fR to the CPU.
+.SS Boot Service
 .TP
 \fBboot enable\fR \fINAME\fR
-Install and enable a systemd service that applies the specified profile at boot.
+Create and enable a systemd service that applies profile \fINAME\fR
+automatically at boot.
+Requires \fBsudo\fR.
 .TP
 \fBboot disable\fR
 Disable and remove the boot service.
 .TP
 \fBboot status\fR
-Show whether the boot service is enabled and, if so, which profile it uses.
-.
+Show whether the boot service is installed and, if enabled, which profile
+it uses.
+.SH EXAMPLES
+.TP
+Show current offsets:
+\fBsudo ruv status\fR
+.TP
+Set core 2 to \-30 mV:
+\fBsudo ruv set 2 \-30\fR
+.TP
+Save current settings as a profile:
+\fBsudo ruv profile save gaming\fR
+.TP
+Apply a saved profile:
+\fBsudo ruv apply gaming\fR
+.TP
+Update cores 0, 2, 4 in profile "gaming" to \-40 mV and apply:
+\fBsudo ruv profile update gaming \-\-cores 0 2 4 \-\-offset \-40 \-\-apply\fR
+.TP
+Enable automatic application of "gaming" at boot:
+\fBsudo ruv boot enable gaming\fR
+.TP
+Check boot service status:
+\fBruv boot status\fR
 .SH FILES
 .TP
 .I /etc/ruv/profiles/
-Directory where JSON profile files are stored. This directory is created
-automatically when the first profile is saved.
+Directory where JSON profile files are stored.
 .TP
 .I /etc/systemd/system/ruv-boot.service
-Systemd service file created by \fBboot enable\fR.
+systemd service file created by \fBboot enable\fR.
 .TP
 .I /sys/kernel/ryzen_smu_drv/
-Sysfs interface of the \fBryzen_smu\fR kernel driver. The presence of
-\fIversion\fR inside this directory indicates that the driver is loaded.
-.TP
-.I /usr/local/bin/ruv-gui
-The main executable (both CLI and GUI are the same script).
-.
+Sysfs interface of the \fBryzen_smu\fR driver.
 .SH ENVIRONMENT
 .TP
-.B RUV_DEBUG
-If set to any value, debug logging is enabled. (As of version 1.0, debug logging
-is enabled by default, so this variable is largely redundant.)
-.
-.SH EXIT STATUS
-.TP
-0
-Success.
-.TP
-1
-An error occurred (e.g. driver not loaded, invalid core number, permission
-denied, or pkexec cancelled).
-.
-.SH TROUBLESHOOTING
-.SS "Driver not loaded"
-If you see \fBError: Ryzen SMU driver not loaded\fR, the kernel module is missing.
-Install it from \fIhttps://github.com/amkillam/ryzen_smu\fR and load it with:
-.P
-.RS
-\fBsudo modprobe ryzen_smu\fR
-.RE
-.SS "pkexec not found"
-Install the \fBpolkit\fR package for your distribution (the package name is
-usually \fBpolkit\fR or \fBpolicykit\-1\fR).
-.SS "Authentication cancelled"
-You pressed Cancel in the pkexec password dialog. The operation was aborted.
-.SS "Graphical interface does not start"
-Make sure \fBPyQt6\fR is installed. On Debian/Ubuntu:
-.RS
-\fBsudo apt install python3\-pyqt6\fR
-.RE
-.P
-On Arch:
-.RS
-\fBsudo pacman \-S python\-pyqt6\fR
-.RE
-.SS "Cursor stays busy or GUI freezes"
-This was a known issue in earlier versions; update to the latest script. If the
-problem persists, run the GUI from a terminal to see debug messages and report
-them.
-.
-.SH EXAMPLES
-.TP
-\fBsudo ruv status\fR
-Display current offsets.
-.TP
-\fBsudo ruv set 2 \-40\fR
-Set core 2 to \-40 mV.
-.TP
-\fBsudo ruv apply gaming\fR
-Apply the profile named "gaming".
-.TP
-\fBsudo ruv profile save daily\fR
-Save the current offsets as a profile called "daily".
-.TP
-\fBsudo ruv profile update daily \-\-cores 0 1 2 3 \-\-offset \-30\fR
-Change the offset for cores 0–3 in the "daily" profile to \-30 mV (without
-applying it live).
-.TP
-\fBsudo ruv boot enable daily\fR
-Make the "daily" profile load automatically at every system startup.
-.TP
-\fBsudo ruv boot disable\fR
-Stop the automatic loading.
-.TP
-\fBsudo ruv reset\fR
-Set all cores back to 0 mV.
-.
+\fBRUV_DEBUG\fR=\fI1\fR
+Enable verbose debug logging to stderr. Equivalent to \fB\-\-debug\fR.
 .SH SEE ALSO
-\fBpkexec\fR(1), \fBsystemctl\fR(1), \fBmodprobe\fR(8)
-.P
-Project repository (ryzen_smu driver):
-\fIhttps://github.com/amkillam/ryzen_smu\fR
+\fBpkexec\fR(1), \fBsystemctl\fR(1)
+.PP
+Ryzen SMU driver: \fIhttps://github.com/amkillam/ryzen_smu\fR
+.SH BUGS
+Report issues at the project's issue tracker.
+.PP
+The tool relies on an out‑of‑tree kernel driver; functionality may vary
+across different Ryzen generations.
