@@ -344,13 +344,12 @@ def cli_status(args: argparse.Namespace) -> None:
     """Handle 'status' command."""
     smu = RyzenSMU()
     cores = get_physical_core_ids()
-    # Use getattr to safely handle missing --json attribute (e.g., from 'list' alias)
     if getattr(args, 'json', False):
         offsets = {str(core): smu.get_core_offset(core) for core in cores}
         print(json.dumps(offsets))
     else:
         for core in cores:
-            print(f"Core {core}: {smu.get_core_offset(core)}")   # mV removed
+            print(f"Core {core}: {smu.get_core_offset(core)} mV")
 
 
 def cli_get(args: argparse.Namespace) -> None:
@@ -360,7 +359,7 @@ def cli_get(args: argparse.Namespace) -> None:
     if args.core not in cores:
         print(f"Error: Core {args.core} does not exist", file=sys.stderr)
         sys.exit(1)
-    print(smu.get_core_offset(args.core))
+    print(f"{smu.get_core_offset(args.core)} mV")
 
 
 def cli_set(args: argparse.Namespace) -> None:
@@ -371,7 +370,7 @@ def cli_set(args: argparse.Namespace) -> None:
         print(f"Error: Core {args.core} does not exist", file=sys.stderr)
         sys.exit(1)
     smu.set_core_offset(args.core, args.offset)
-    print(f"Core {args.core} set to {args.offset}")   # mV removed
+    print(f"Core {args.core} set to {args.offset} mV")
 
 
 def cli_apply(args: argparse.Namespace) -> None:
@@ -389,14 +388,14 @@ def cli_apply(args: argparse.Namespace) -> None:
     smu = RyzenSMU()
     cores = get_physical_core_ids()
     for core in cores:
-        print(f"Core {core}: {smu.get_core_offset(core)}")   # mV removed
+        print(f"Core {core}: {smu.get_core_offset(core)} mV")
 
 
 def cli_reset(args: argparse.Namespace) -> None:
     """Handle 'reset' command."""
     smu = RyzenSMU()
     smu.reset_all_offsets()
-    print("All offsets reset to 0")   # mV removed
+    print("All offsets reset to 0 mV")
 
 
 def cli_profile_list(args: argparse.Namespace) -> None:
