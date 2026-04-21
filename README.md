@@ -74,7 +74,7 @@ sudo ruv-gui get <cores>
 ```bash
 sudo ruv-gui set <cores> <offset>
 ```
-##### Reset all offsets to 0 mV
+##### Reset all cores to 0 mV
 ```bash
 sudo ruv-gui reset
 ```
