@@ -1,26 +1,25 @@
-.\" Man page for ruv – Ryzen Undervolt Tool
-.\" Format with: groff -man -Tascii ruv.1
+.\" Man page for ruv-gui – Ryzen Undervolt Tool
+.\" Format with: groff -man -Tascii ruv-gui.1
 
-.TH RUV 1 "2026-04-21" "ruv 1.1" "User Commands"
+.TH RUV-GUI 1 "2026-04-21" "ruv-gui 1.1" "User Commands"
 .SH NAME
-ruv \- control Ryzen CPU core voltage offsets via the ryzen_smu driver
+ruv-gui \- control Ryzen CPU core voltage offsets via the ryzen_smu driver
 .SH SYNOPSIS
-.B ruv
+.B ruv-gui
 .I COMMAND
 [\fIOPTIONS\fR]
 .br
 .B ruv-gui
-(launches graphical interface)
+(without arguments launches graphical interface)
 
 .SH DESCRIPTION
-\fBruv\fR is a command-line and graphical tool to read and set per\-core
+\fBruv-gui\fR is a command-line and graphical tool to read and set per\-core
 voltage offsets on AMD Ryzen CPUs that are supported by the
 \fBryzen_smu\fR kernel driver. It can also save and apply profiles, and
 set up a systemd service to reapply offsets at boot.
 
-When run without arguments, the graphical user interface (GUI) is launched
-(requires \fBruv-gui\fR command). Root privileges are required for most
-CLI operations; use \fBsudo\fR(8) or run as root.
+When run without arguments, the graphical user interface (GUI) is launched.
+Root privileges are required for most CLI operations; use \fBsudo\fR(8) or run as root.
 
 .SH CORE SPECIFICATION SYNTAX
 Many commands accept flexible core specifications:
@@ -123,58 +122,58 @@ it uses.
 .SH EXAMPLES
 .TP
 Show current offsets:
-\fBsudo ruv status\fR
+\fBsudo ruv-gui status\fR
 .TP
 Show offsets in JSON format:
-\fBsudo ruv status \-\-json\fR
+\fBsudo ruv-gui status \-\-json\fR
 .TP
 Get offset for cores 0 through 3:
-\fBsudo ruv get 0\-3\fR
+\fBsudo ruv-gui get 0\-3\fR
 .TP
 Set core 2 to \-30 mV:
-\fBsudo ruv set 2 \-30\fR
+\fBsudo ruv-gui set 2 \-30\fR
 .TP
 Set all cores 0\-7 to \-40 mV:
-\fBsudo ruv set 0\-7 \-40\fR
+\fBsudo ruv-gui set 0\-7 \-40\fR
 .TP
 Set multiple specific cores:
-\fBsudo ruv set 0,2,4 \-25\fR
+\fBsudo ruv-gui set 0,2,4 \-25\fR
 .TP
 Apply same offset to multiple cores without saving:
-\fBsudo ruv apply\-list 0\-7 \-50\fR
+\fBsudo ruv-gui apply\-list 0\-7 \-50\fR
 .TP
 Save current settings as a profile:
-\fBsudo ruv profile save gaming\fR
+\fBsudo ruv-gui profile save gaming\fR
 .TP
 List all saved profiles:
-\fBsudo ruv profile list\fR
+\fBsudo ruv-gui profile list\fR
 .TP
 Read a profile's contents:
-\fBsudo ruv profile read gaming\fR
+\fBsudo ruv-gui profile read gaming\fR
 .TP
 Apply a saved profile:
-\fBsudo ruv apply gaming\fR
+\fBsudo ruv-gui apply gaming\fR
 .TP
 Update cores in profile "gaming" using range syntax:
-\fBsudo ruv profile update gaming \-\-cores 0\-3 \-\-offset \-35\fR
+\fBsudo ruv-gui profile update gaming \-\-cores 0\-3 \-\-offset \-35\fR
 .TP
 Update specific cores and apply immediately:
-\fBsudo ruv profile update gaming \-\-cores 0,2,4 \-\-offset \-40 \-\-apply\fR
+\fBsudo ruv-gui profile update gaming \-\-cores 0,2,4 \-\-offset \-40 \-\-apply\fR
 .TP
 Delete a profile:
-\fBsudo ruv profile delete oldprofile\fR
+\fBsudo ruv-gui profile delete oldprofile\fR
 .TP
 Enable automatic application of "gaming" at boot:
-\fBsudo ruv boot enable gaming\fR
+\fBsudo ruv-gui boot enable gaming\fR
 .TP
 Check boot service status:
-\fBruv boot status\fR
+\fBsudo ruv-gui boot status\fR
 .TP
 Disable boot service:
-\fBsudo ruv boot disable\fR
+\fBsudo ruv-gui boot disable\fR
 .TP
 Reset all offsets to 0:
-\fBsudo ruv reset\fR
+\fBsudo ruv-gui reset\fR
 
 .SH FILES
 .TP
