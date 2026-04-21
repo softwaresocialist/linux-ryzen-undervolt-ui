@@ -70,13 +70,9 @@ sudo ruv-gui status
 ```bash
 sudo ruv-gui get <cores>
 ```
-##### Set offset for single core
+##### Set offset for a number of cores
 ```bash
-sudo ruv-gui set <core> <offset>
-```
-##### Apply the same offset to multiple cores
-```bash
-sudo ruv-gui apply-list <cores> <offset>
+sudo ruv-gui set <cores> <offset>
 ```
 ##### Reset all offsets to 0 mV
 ```bash
