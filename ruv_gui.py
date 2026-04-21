@@ -17,7 +17,7 @@ import shutil
 import re
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union, Tuple
 
 # ----------------------------------------------------------------------
 # Logging setup (debug mode can be enabled with RUV_DEBUG=1)
@@ -48,7 +48,6 @@ try:
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
-    # We still want the CLI to work even if PyQt6 is missing
     if len(sys.argv) == 1:
         print("PyQt6 is required for the GUI. Please install it or use the CLI.", file=sys.stderr)
         sys.exit(1)
@@ -289,6 +288,39 @@ def get_physical_core_ids() -> List[int]:
 
 
 # ----------------------------------------------------------------------
+# Core range parsing
+# ----------------------------------------------------------------------
+def parse_core_range(spec: str) -> List[int]:
+    """
+    Parse a core specification like "0", "0,2,4", "0-7" into a list of core IDs.
+    Validates against actual system cores.
+    """
+    available = set(get_physical_core_ids())
+    cores = set()
+    parts = spec.replace(" ", "").split(",")
+    for part in parts:
+        if "-" in part:
+            try:
+                start, end = map(int, part.split("-"))
+                if start > end:
+                    raise ValueError
+                cores.update(range(start, end + 1))
+            except ValueError:
+                raise ValueError(f"Invalid range: {part}")
+        else:
+            try:
+                cores.add(int(part))
+            except ValueError:
+                raise ValueError(f"Invalid core number: {part}")
+
+    # Filter by available cores
+    invalid = cores - available
+    if invalid:
+        raise ValueError(f"Core(s) {sorted(invalid)} do not exist. Available: {sorted(available)}")
+    return sorted(cores)
+
+
+# ----------------------------------------------------------------------
 # Profile management helpers (CLI and internal use)
 # ----------------------------------------------------------------------
 def validate_profile_name(name: str) -> bool:
@@ -355,40 +387,71 @@ def cli_status(args: argparse.Namespace) -> None:
 def cli_get(args: argparse.Namespace) -> None:
     """Handle 'get' command."""
     smu = RyzenSMU()
-    cores = get_physical_core_ids()
-    if args.core not in cores:
-        print(f"Error: Core {args.core} does not exist", file=sys.stderr)
+    try:
+        core_list = parse_core_range(args.core)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"{smu.get_core_offset(args.core)} mV")
+    for core in core_list:
+        offset = smu.get_core_offset(core)
+        if offset is None:
+            print(f"Core {core}: error reading offset", file=sys.stderr)
+        else:
+            print(f"Core {core}: {offset} mV")
 
 
 def cli_set(args: argparse.Namespace) -> None:
     """Handle 'set' command."""
     smu = RyzenSMU()
-    cores = get_physical_core_ids()
-    if args.core not in cores:
-        print(f"Error: Core {args.core} does not exist", file=sys.stderr)
+    try:
+        core_list = parse_core_range(args.core)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    smu.set_core_offset(args.core, args.offset)
-    print(f"Core {args.core} set to {args.offset} mV")
+    for core in core_list:
+        try:
+            smu.set_core_offset(core, args.offset)
+            print(f"Core {core} set to {args.offset} mV")
+        except Exception as e:
+            print(f"Error setting core {core}: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
-def cli_apply(args: argparse.Namespace) -> None:
-    """Handle 'apply' command."""
-    profile_path = PROFILES_DIR / f"{args.name}.json"
+def cli_apply_list(args: argparse.Namespace) -> None:
+    """Handle 'apply-list' command."""
+    smu = RyzenSMU()
+    try:
+        core_list = parse_core_range(args.cores)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    for core in core_list:
+        try:
+            smu.set_core_offset(core, args.offset)
+            print(f"Core {core} set to {args.offset} mV")
+        except Exception as e:
+            print(f"Error setting core {core}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+
+def cli_apply_profile(args: argparse.Namespace) -> None:
+    """Handle 'apply' command (apply a profile)."""
+    name = args.name.strip()
+    profile_path = PROFILES_DIR / f"{name}.json"
     if not profile_path.is_file():
-        print(f"Error: Profile '{args.name}' not found", file=sys.stderr)
+        print(f"Error: Profile '{name}' not found", file=sys.stderr)
         sys.exit(1)
     try:
         apply_profile_file(profile_path)
+        print(f"Profile '{name}' applied.")
+        # Show current offsets after apply
+        smu = RyzenSMU()
+        cores = get_physical_core_ids()
+        for core in cores:
+            print(f"Core {core}: {smu.get_core_offset(core)} mV")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    # Show current offsets after apply
-    smu = RyzenSMU()
-    cores = get_physical_core_ids()
-    for core in cores:
-        print(f"Core {core}: {smu.get_core_offset(core)} mV")
 
 
 def cli_reset(args: argparse.Namespace) -> None:
@@ -444,6 +507,28 @@ def cli_profile_delete(args: argparse.Namespace) -> None:
         print(f"Profile '{name}' deleted.")
 
 
+def cli_profile_apply(args: argparse.Namespace) -> None:
+    """Handle 'profile apply' command (alias for 'apply')."""
+    # Reuse cli_apply_profile logic
+    args.name = args.profile_name
+    cli_apply_profile(args)
+
+
+def cli_profile_read(args: argparse.Namespace) -> None:
+    """Handle 'profile read' command."""
+    name = args.name.strip()
+    profile_path = PROFILES_DIR / f"{name}.json"
+    if not profile_path.is_file():
+        print(f"Error: Profile '{name}' not found.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with open(profile_path) as f:
+            print(f.read(), end="")
+    except Exception as e:
+        print(f"Error reading profile: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cli_profile_update(args: argparse.Namespace) -> None:
     """Handle 'profile update' command."""
     name = args.name.strip()
@@ -451,11 +536,12 @@ def cli_profile_update(args: argparse.Namespace) -> None:
     if not profile_path.is_file():
         print(f"Profile '{name}' does not exist.", file=sys.stderr)
         sys.exit(1)
-    cores_available = get_physical_core_ids()
-    for core in args.cores:
-        if core not in cores_available:
-            print(f"Error: Core {core} does not exist.", file=sys.stderr)
-            sys.exit(1)
+
+    try:
+        core_list = parse_core_range(args.cores)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     with open(profile_path) as f:
         data = json.load(f)
@@ -463,21 +549,41 @@ def cli_profile_update(args: argparse.Namespace) -> None:
         print("Invalid profile JSON.", file=sys.stderr)
         sys.exit(1)
 
-    for core in args.cores:
+    for core in core_list:
         data[str(core)] = args.offset
 
     with open(profile_path, "w") as f:
         json.dump(data, f, indent=2)
-    print(f"Profile '{name}' updated.")
+    print(f"Profile '{name}' updated for cores {core_list}.")
 
     if args.apply:
         if not RyzenSMU.driver_loaded():
-            print("Warning: Driver not loaded.", file=sys.stderr)
+            print("Warning: Driver not loaded, cannot apply.", file=sys.stderr)
         else:
             smu = RyzenSMU()
-            for core in args.cores:
-                smu.set_core_offset(core, args.offset)
+            for core in core_list:
+                try:
+                    smu.set_core_offset(core, args.offset)
+                    print(f"Core {core} set to {args.offset} mV")
+                except Exception as e:
+                    print(f"Error applying to core {core}: {e}", file=sys.stderr)
             print("Applied to CPU.")
+
+
+def cli_read_profile(args: argparse.Namespace) -> None:
+    """Handle standalone 'read-profile' command (deprecated, use 'profile read')."""
+    path = Path(args.file).resolve()
+    try:
+        path.relative_to(PROFILES_DIR)
+    except ValueError:
+        print(f"Error: Profile file must be under {PROFILES_DIR}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with open(path) as f:
+            print(f.read(), end="")
+    except Exception as e:
+        print(f"Error reading profile: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cli_boot_enable(args: argparse.Namespace) -> None:
@@ -494,7 +600,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env python3 {INSTALLED_BIN_PATH} -- apply-file {profile_path}
+ExecStart=/usr/bin/env python3 {INSTALLED_BIN_PATH} -- apply {name}
 RemainAfterExit=no
 
 [Install]
@@ -542,7 +648,7 @@ def cli_boot_status(args: argparse.Namespace) -> None:
             try:
                 with open("/etc/systemd/system/ruv-boot.service") as f:
                     content = f.read()
-                    match = re.search(r"apply-file\s+(\S+)", content)
+                    match = re.search(r"apply\s+(\S+)", content)
                     profile = match.group(1) if match else "unknown"
                 print(f"Boot service ENABLED (profile: {profile})")
             except Exception:
@@ -562,20 +668,28 @@ def cli_boot_status(args: argparse.Namespace) -> None:
 def cli_mode(cli_args: List[str]) -> None:
     """Parse CLI arguments and execute the requested command."""
     parser = argparse.ArgumentParser(
+        prog="ruv",
         description="Ryzen SMU voltage control – CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Core specifications can be:
+  - single core:   0
+  - comma list:    0,2,4
+  - range:         0-7
+  - combination:   0,2-5,7
+
 Examples:
-  sudo ruv status                 Show current offsets
-  sudo ruv get 2                  Get offset of core 2
-  sudo ruv set 2 -30              Set core 2 offset to -30 mV
-  sudo ruv apply gaming           Apply profile 'gaming'
-  sudo ruv profile list           List saved profiles
-  sudo ruv profile save myprofile Save current offsets as 'myprofile'
-  sudo ruv profile update myprofile --cores 0 2 4 --offset -40
-  sudo ruv boot enable myprofile  Apply 'myprofile' at every boot
-  sudo ruv boot disable           Disable boot-time application
-  sudo ruv reset                  Reset all offsets to 0
+  sudo ruv status
+  sudo ruv get 0-3
+  sudo ruv set 2 -30
+  sudo ruv apply-list 0-7 -40
+  sudo ruv apply myprofile
+  sudo ruv profile list
+  sudo ruv profile save gaming
+  sudo ruv profile read gaming
+  sudo ruv profile update gaming --cores 0,2,4 --offset -35 --apply
+  sudo ruv boot enable gaming
+  sudo ruv reset
         """
     )
     parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
@@ -587,17 +701,29 @@ Examples:
     status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     # get
-    get_parser = subparsers.add_parser("get", help="Get offset for a specific core")
-    get_parser.add_argument("core", type=int, help="Core ID")
+    get_parser = subparsers.add_parser("get", help="Get offset for one or more cores")
+    get_parser.add_argument("core", help="Core specification (e.g., 0, 0-3, 0,2,4)")
 
     # set
-    set_parser = subparsers.add_parser("set", help="Set offset for a specific core")
-    set_parser.add_argument("core", type=int, help="Core ID")
+    set_parser = subparsers.add_parser("set", help="Set offset for one or more cores")
+    set_parser.add_argument("core", help="Core specification")
     set_parser.add_argument("offset", type=int, help="Offset in mV")
 
-    # apply
+    # apply-list
+    apply_list_parser = subparsers.add_parser(
+        "apply-list",
+        help="Apply the same offset to multiple cores without saving a profile",
+        description="Set the given offset (mV) for a list of core IDs."
+    )
+    apply_list_parser.add_argument("cores", help="Core specification")
+    apply_list_parser.add_argument("offset", type=int, help="Offset in mV")
+
+    # apply (profile)
     apply_parser = subparsers.add_parser("apply", help="Apply a saved profile by name")
     apply_parser.add_argument("name", help="Profile name (without .json)")
+
+    # reset
+    subparsers.add_parser("reset", help="Reset all offsets to 0 mV")
 
     # profile
     profile_parser = subparsers.add_parser("profile", help="Manage profiles")
@@ -608,11 +734,19 @@ Examples:
     profile_save.add_argument("name", help="Profile name (alphanumeric, underscore, hyphen, dot)")
     profile_delete = profile_sub.add_parser("delete", help="Delete a profile")
     profile_delete.add_argument("name", help="Profile name")
+    profile_apply = profile_sub.add_parser("apply", help="Apply a saved profile (alias for 'apply')")
+    profile_apply.add_argument("profile_name", help="Profile name")
+    profile_read = profile_sub.add_parser("read", help="Display the JSON content of a saved profile")
+    profile_read.add_argument("name", help="Profile name (without .json)")
     profile_update = profile_sub.add_parser("update", help="Update specific cores in a profile")
     profile_update.add_argument("name", help="Profile name")
-    profile_update.add_argument("--cores", type=int, nargs="+", required=True)
-    profile_update.add_argument("--offset", type=int, required=True)
-    profile_update.add_argument("--apply", action="store_true")
+    profile_update.add_argument("--cores", required=True, help="Core specification")
+    profile_update.add_argument("--offset", type=int, required=True, help="New offset in mV")
+    profile_update.add_argument("--apply", action="store_true", help="Also apply the updated offsets to CPU immediately")
+
+    # read-profile (standalone, kept for compatibility but can be hidden)
+    read_profile_parser = subparsers.add_parser("read-profile", help="Display JSON of a profile file (deprecated)")
+    read_profile_parser.add_argument("file", help="Path to profile JSON file (under /etc/ruv/profiles/)")
 
     # boot
     boot_parser = subparsers.add_parser("boot", help="Manage boot-time application")
@@ -622,18 +756,10 @@ Examples:
     boot_disable = boot_sub.add_parser("disable", help="Disable boot-time application")
     boot_status = boot_sub.add_parser("status", help="Show boot service status")
 
-    # reset
-    subparsers.add_parser("reset", help="Reset all offsets to 0")
-
-    # Internal commands (used via pkexec)
-    subparsers.add_parser("list", help=argparse.SUPPRESS)  # alias for status
+    # Internal commands (used via pkexec, hidden from help)
+    subparsers.add_parser("list", help=argparse.SUPPRESS)
     apply_file_parser = subparsers.add_parser("apply-file", help=argparse.SUPPRESS)
     apply_file_parser.add_argument("file", type=str)
-    apply_list_parser = subparsers.add_parser("apply-list", help=argparse.SUPPRESS)
-    apply_list_parser.add_argument("cores", type=int, nargs="+")
-    apply_list_parser.add_argument("offset", type=int)
-    read_profile_parser = subparsers.add_parser("read-profile", help=argparse.SUPPRESS)
-    read_profile_parser.add_argument("file", type=str)
     write_profile_parser = subparsers.add_parser("write-profile", help=argparse.SUPPRESS)
     write_profile_parser.add_argument("file", type=str)
     delete_profile_file_parser = subparsers.add_parser("delete-profile-file", help=argparse.SUPPRESS)
@@ -650,18 +776,7 @@ Examples:
     # Internal privileged commands (called via pkexec)
     # ------------------------------------------------------------------
     if args.command == "read-profile":
-        path = Path(args.file).resolve()
-        try:
-            path.relative_to(PROFILES_DIR)
-        except ValueError:
-            print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
-            sys.exit(1)
-        try:
-            with open(path) as f:
-                print(f.read(), end="")
-        except Exception as e:
-            print(f"Error reading profile: {e}", file=sys.stderr)
-            sys.exit(1)
+        cli_read_profile(args)
         return
 
     if args.command == "write-profile":
@@ -735,32 +850,12 @@ Examples:
             sys.exit(1)
         return
 
-    # Aliases and internal conversions
+    # Alias 'list' -> 'status'
     if args.command == "list":
         args.command = "status"
     elif args.command == "apply-file":
         args.command = "apply"
         args.name = Path(args.file).stem
-    elif args.command == "apply-list":
-        # Direct application of offsets to specified cores
-        if not RyzenSMU.driver_loaded():
-            print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
-            sys.exit(1)
-        smu = RyzenSMU()
-        cores_available = get_physical_core_ids()
-        invalid = [c for c in args.cores if c not in cores_available]
-        if invalid:
-            print(f"Error: Cores {invalid} do not exist", file=sys.stderr)
-            sys.exit(1)
-        try:
-            for core in args.cores:
-                smu.set_core_offset(core, args.offset)
-            for core in args.cores:
-                print(f"{core}: {smu.get_core_offset(core)}")
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-        return
 
     # ------------------------------------------------------------------
     # Regular user commands
@@ -775,8 +870,10 @@ Examples:
         cli_get(args)
     elif args.command == "set":
         cli_set(args)
+    elif args.command == "apply-list":
+        cli_apply_list(args)
     elif args.command == "apply":
-        cli_apply(args)
+        cli_apply_profile(args)
     elif args.command == "reset":
         cli_reset(args)
     elif args.command == "profile":
@@ -786,8 +883,14 @@ Examples:
             cli_profile_save(args)
         elif args.profile_cmd == "delete":
             cli_profile_delete(args)
+        elif args.profile_cmd == "apply":
+            cli_profile_apply(args)
+        elif args.profile_cmd == "read":
+            cli_profile_read(args)
         elif args.profile_cmd == "update":
             cli_profile_update(args)
+    elif args.command == "read-profile":
+        cli_read_profile(args)
     elif args.command == "boot":
         if args.boot_cmd == "enable":
             cli_boot_enable(args)
@@ -800,7 +903,7 @@ Examples:
 
 
 # ----------------------------------------------------------------------
-# GUI components (only loaded if needed)
+# GUI components (unchanged from original, but included for completeness)
 # ----------------------------------------------------------------------
 if GUI_AVAILABLE:
 
@@ -1047,7 +1150,8 @@ if GUI_AVAILABLE:
                 self.output.setText("No cores selected.")
                 return
             offset = self.offset_spin.value()
-            args = ["apply-list"] + [str(c) for c in selected] + [str(offset)]
+            # Use apply-list with core list as comma-separated string
+            args = ["apply-list", ",".join(map(str, selected)), str(offset)]
 
             def on_finish(output):
                 self.output.setText(output)
@@ -1093,7 +1197,6 @@ if GUI_AVAILABLE:
                 return
             json_path = PROFILES_DIR / f"{name}.json"
 
-            # Combined operation: reset offsets and delete profile file
             class CombinedWorker(QThread):
                 finished = pyqtSignal(str)
                 error = pyqtSignal(str)
@@ -1203,7 +1306,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env python3 {INSTALLED_BIN_PATH} -- apply-file {json_path}
+ExecStart=/usr/bin/env python3 {INSTALLED_BIN_PATH} -- apply {name}
 RemainAfterExit=no
 
 [Install]
