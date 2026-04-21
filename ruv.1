@@ -1,47 +1,77 @@
 .\" Man page for ruv – Ryzen Undervolt Tool
 .\" Format with: groff -man -Tascii ruv.1
 
-.TH RUV 1 "2026-04-17" "ruv 1.0" "User Commands"
+.TH RUV 1 "2026-04-21" "ruv 1.1" "User Commands"
 .SH NAME
 ruv \- control Ryzen CPU core voltage offsets via the ryzen_smu driver
 .SH SYNOPSIS
 .B ruv
 .I COMMAND
 [\fIOPTIONS\fR]
+.br
+.B ruv-gui
+(launches graphical interface)
+
 .SH DESCRIPTION
-\fBruv\fR is a command-line and graphical tool to read and set per‑core
+\fBruv\fR is a command-line and graphical tool to read and set per\-core
 voltage offsets on AMD Ryzen CPUs that are supported by the
 \fBryzen_smu\fR kernel driver. It can also save and apply profiles, and
 set up a systemd service to reapply offsets at boot.
 
-When run without arguments, the graphical user interface (GUI) is launched.
-Root privileges are required for most operations; the tool uses
-\fBpkexec\fR(1) to obtain them when needed.
+When run without arguments, the graphical user interface (GUI) is launched
+(requires \fBruv-gui\fR command). Root privileges are required for most
+CLI operations; use \fBsudo\fR(8) or run as root.
+
+.SH CORE SPECIFICATION SYNTAX
+Many commands accept flexible core specifications:
+.TP
+\fIsingle core\fR
+\fB0\fR, \fB2\fR, \fB5\fR
+.TP
+\fIcomma\-separated list\fR
+\fB0,2,4\fR
+.TP
+\fIrange (inclusive)\fR
+\fB0\-7\fR (all cores from 0 to 7)
+.TP
+\fIcombination\fR
+\fB0,2\-5,7\fR (cores 0, 2, 3, 4, 5, and 7)
+
 .SH OPTIONS
 .TP
 \fB\-\-debug\fR
 Enable debug logging (environment variable \fBRUV_DEBUG=1\fR has the same effect).
 This option is mainly for internal use and may be suppressed in help output.
+
 .SH COMMANDS
+
 .SS Status and Inspection
 .TP
 \fBstatus\fR [\fB\-\-json\fR]
 Display the current voltage offset (in mV) for each physical core.
 With \fB\-\-json\fR, output a JSON object mapping core numbers to offsets.
 .TP
-\fBget\fR \fICORE\fR
-Print the current offset of a single core.
+\fBget\fR \fICORE_SPEC\fR
+Print the current offset for the specified core(s).
+Accepts any core specification syntax (e.g., \fB0\fR, \fB0\-3\fR, \fB0,2,4\fR).
 .TP
 \fBlist\fR
 Alias for \fBstatus\fR (provided for internal compatibility).
+
 .SS Modifying Offsets
 .TP
-\fBset\fR \fICORE\fR \fIOFFSET\fR
-Set the offset of \fICORE\fR to \fIOFFSET\fR mV.
+\fBset\fR \fICORE_SPEC\fR \fIOFFSET\fR
+Set the offset of the specified core(s) to \fIOFFSET\fR mV.
 Valid offsets are between \-100 and +100 mV.
+Accepts any core specification syntax.
+.TP
+\fBapply\-list\fR \fICORE_SPEC\fR \fIOFFSET\fR
+Apply the same offset to multiple cores without saving a profile.
+Functionally similar to \fBset\fR but optimized for bulk operations.
 .TP
 \fBreset\fR
 Reset all core offsets to 0 mV.
+
 .SS Profile Management
 Profiles are stored as JSON files under \fI/etc/ruv/profiles/\fR.
 .TP
@@ -56,19 +86,32 @@ Profile names may contain letters, digits, underscores, hyphens, and dots.
 Delete the profile \fINAME\fR and optionally reset all offsets to 0
 (interactive confirmation).
 .TP
-\fBprofile update\fR \fINAME\fR \fB\-\-cores\fR \fICORE\fR... \fB\-\-offset\fR \fIOFFSET\fR [\fB\-\-apply\fR]
+\fBprofile apply\fR \fINAME\fR
+Apply the offsets stored in profile \fINAME\fR to the CPU.
+Alias for \fBapply\fR command.
+.TP
+\fBprofile read\fR \fINAME\fR
+Display the JSON content of profile \fINAME\fR.
+Outputs the raw profile data stored in \fI/etc/ruv/profiles/NAME.json\fR.
+.TP
+\fBprofile update\fR \fINAME\fR \fB\-\-cores\fR \fICORE_SPEC\fR \fB\-\-offset\fR \fIOFFSET\fR [\fB\-\-apply\fR]
 Update the offsets of specific cores inside an existing profile.
+Accepts any core specification syntax for \fB\-\-cores\fR.
 If \fB\-\-apply\fR is given, the new offsets are also applied to the CPU
 immediately.
 .TP
 \fBapply\fR \fINAME\fR
 Apply the offsets stored in profile \fINAME\fR to the CPU.
+.TP
+\fBread\-profile\fR \fIFILE\fR
+Legacy command to read a profile by full file path.
+Prefer \fBprofile read\fR \fINAME\fR instead.
+
 .SS Boot Service
 .TP
 \fBboot enable\fR \fINAME\fR
 Create and enable a systemd service that applies profile \fINAME\fR
-automatically at boot.
-Requires \fBsudo\fR.
+automatically at boot. The service runs once after multi\-user.target.
 .TP
 \fBboot disable\fR
 Disable and remove the boot service.
@@ -76,48 +119,130 @@ Disable and remove the boot service.
 \fBboot status\fR
 Show whether the boot service is installed and, if enabled, which profile
 it uses.
+
 .SH EXAMPLES
 .TP
 Show current offsets:
 \fBsudo ruv status\fR
 .TP
+Show offsets in JSON format:
+\fBsudo ruv status \-\-json\fR
+.TP
+Get offset for cores 0 through 3:
+\fBsudo ruv get 0\-3\fR
+.TP
 Set core 2 to \-30 mV:
 \fBsudo ruv set 2 \-30\fR
+.TP
+Set all cores 0\-7 to \-40 mV:
+\fBsudo ruv set 0\-7 \-40\fR
+.TP
+Set multiple specific cores:
+\fBsudo ruv set 0,2,4 \-25\fR
+.TP
+Apply same offset to multiple cores without saving:
+\fBsudo ruv apply\-list 0\-7 \-50\fR
 .TP
 Save current settings as a profile:
 \fBsudo ruv profile save gaming\fR
 .TP
+List all saved profiles:
+\fBsudo ruv profile list\fR
+.TP
+Read a profile's contents:
+\fBsudo ruv profile read gaming\fR
+.TP
 Apply a saved profile:
 \fBsudo ruv apply gaming\fR
 .TP
-Update cores 0, 2, 4 in profile "gaming" to \-40 mV and apply:
-\fBsudo ruv profile update gaming \-\-cores 0 2 4 \-\-offset \-40 \-\-apply\fR
+Update cores in profile "gaming" using range syntax:
+\fBsudo ruv profile update gaming \-\-cores 0\-3 \-\-offset \-35\fR
+.TP
+Update specific cores and apply immediately:
+\fBsudo ruv profile update gaming \-\-cores 0,2,4 \-\-offset \-40 \-\-apply\fR
+.TP
+Delete a profile:
+\fBsudo ruv profile delete oldprofile\fR
 .TP
 Enable automatic application of "gaming" at boot:
 \fBsudo ruv boot enable gaming\fR
 .TP
 Check boot service status:
 \fBruv boot status\fR
+.TP
+Disable boot service:
+\fBsudo ruv boot disable\fR
+.TP
+Reset all offsets to 0:
+\fBsudo ruv reset\fR
+
 .SH FILES
 .TP
 .I /etc/ruv/profiles/
 Directory where JSON profile files are stored.
 .TP
-.I /etc/systemd/system/ruv-boot.service
+.I /etc/ruv/profiles/*.json
+Individual profile files containing core offset mappings.
+.TP
+.I /etc/systemd/system/ruv\-boot.service
 systemd service file created by \fBboot enable\fR.
 .TP
 .I /sys/kernel/ryzen_smu_drv/
 Sysfs interface of the \fBryzen_smu\fR driver.
+.TP
+.I /usr/local/bin/ruv\-gui
+Main executable (symlink to ruv_gui.py).
+.TP
+.I /usr/share/applications/ruv\-gui.desktop
+Desktop entry for the GUI.
+
 .SH ENVIRONMENT
 .TP
 \fBRUV_DEBUG\fR=\fI1\fR
 Enable verbose debug logging to stderr. Equivalent to \fB\-\-debug\fR.
+.TP
+\fBQT_LOGGING_RULES\fR
+Set to \fBqt.qpa.theme=false\fR by the GUI to suppress Qt theme warnings.
+
+.SH EXIT STATUS
+.TP
+0
+Success.
+.TP
+1
+Error occurred (invalid arguments, driver not loaded, permission denied, etc.)
+
+.SH NOTES
+.IP \(bu 2
+The tool requires the \fBryzen_smu\fR kernel driver to be loaded.
+Load it with \fBsudo modprobe ryzen_smu\fR.
+.IP \(bu 2
+The GUI should not be run as root; it uses \fBpkexec\fR(1) to elevate
+privileges when needed.
+.IP \(bu 2
+Offset values are in millivolts (mV) and typically negative for undervolting.
+The valid range is \-100 to +100 mV.
+.IP \(bu 2
+Profile names are restricted to alphanumeric characters, underscore,
+hyphen, and dot (\fB^[a\-zA\-Z0\-9_.\-]+$\fR).
+.IP \(bu 2
+The boot service runs after \fBmulti\-user.target\fR and executes once
+per boot. Check its status with \fBsystemctl status ruv\-boot.service\fR
+or view logs with \fBjournalctl \-u ruv\-boot.service\fR.
+
 .SH SEE ALSO
-\fBpkexec\fR(1), \fBsystemctl\fR(1)
+\fBpkexec\fR(1), \fBsystemctl\fR(1), \fBjournalctl\fR(1), \fBmodprobe\fR(8)
 .PP
 Ryzen SMU driver: \fIhttps://github.com/amkillam/ryzen_smu\fR
+.br
+Project repository: \fIhttps://github.com/softwaresocialist/linux\-ryzen\-undervolt\-ui\fR
+
 .SH BUGS
 Report issues at the project's issue tracker.
 .PP
-The tool relies on an out‑of‑tree kernel driver; functionality may vary
-across different Ryzen generations.
+The tool relies on an out\-of\-tree kernel driver; functionality may vary
+across different Ryzen generations. Incorrect offsets may cause system
+instability or hardware damage. Use at your own risk.
+
+.SH AUTHOR
+Developed with AI assistance. Contributions and feedback welcome.
