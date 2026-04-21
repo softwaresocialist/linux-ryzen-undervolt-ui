@@ -98,7 +98,7 @@ sudo ruv-gui profile read <profile-name>
 ### Managing Boot Profiles
 ##### Enable a Profile at Boot
 ```bash
-sudo ruv-gui boot enable gaming
+sudo ruv-gui boot enable <profile-name>
 ```
 ##### Check Current Boot profile Status
 ```bash
