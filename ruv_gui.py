@@ -18,7 +18,7 @@ import re
 import logging
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Union, Tuple
+from typing import List, Optional, Dict, Any
 
 # ----------------------------------------------------------------------
 # Logging setup (debug mode can be enabled with RUV_DEBUG=1)
@@ -44,7 +44,7 @@ try:
         QComboBox, QInputDialog, QListWidget,
         QListWidgetItem, QAbstractItemView, QSplitter
     )
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QIcon, QCursor
     GUI_AVAILABLE = True
 except ImportError:
@@ -86,10 +86,6 @@ class PrivilegedRunner:
                 )
         except subprocess.TimeoutExpired:
             raise RuntimeError("Operation timed out. The driver may be unresponsive.")
-        except subprocess.CalledProcessError as e:
-            if e.returncode == 126:
-                raise RuntimeError("Authentication cancelled.")
-            raise RuntimeError(f"Privileged command failed: {e.stderr.strip() or e.stdout.strip()}")
         except Exception as e:
             raise RuntimeError(f"Unexpected error: {e}")
 
@@ -420,29 +416,6 @@ def write_text_atomic(path: Path, content: str, mode: int = 0o644) -> None:
             os.unlink(tmp_name)
 
 
-def apply_offset_to_cores(smu: RyzenSMU, core_list: List[int], offset: int) -> Tuple[List[int], List[str]]:
-    """Apply one offset to many cores and return (successful_cores, failure_messages)."""
-    successful: List[int] = []
-    failed: List[str] = []
-    for core in core_list:
-        try:
-            smu.set_core_offset(core, offset)
-            successful.append(core)
-        except Exception as e:
-            failed.append(f"{core}: {e}")
-    return successful, failed
-
-
-def print_apply_summary(successful: List[int], failed: List[str], offset: int) -> None:
-    """Print structured summary for multi-core apply operations."""
-    if successful:
-        print(f"Applied {offset} mV to cores: {successful}")
-    if failed:
-        print("Failed cores:", file=sys.stderr)
-        for item in failed:
-            print(f"  - {item}", file=sys.stderr)
-
-
 def save_current_offsets_as_profile(name: str) -> None:
     """Save current core offsets to a profile file."""
     if not RyzenSMU.driver_loaded():
@@ -460,7 +433,7 @@ def apply_profile_file(profile_path: Path) -> None:
     if not RyzenSMU.driver_loaded():
         raise RuntimeError("Ryzen SMU driver not loaded.")
     smu = RyzenSMU()
-    cores = get_physical_core_ids()
+    cores = set(get_physical_core_ids())
     data = load_and_validate_profile_data(profile_path)
     failed = []
     for core, offset in data.items():
@@ -515,10 +488,13 @@ def cli_set(args: argparse.Namespace) -> None:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    successful, failed = apply_offset_to_cores(smu, core_list, args.offset)
-    print_apply_summary(successful, failed, args.offset)
-    if failed:
-        sys.exit(1)
+    for core in core_list:
+        try:
+            smu.set_core_offset(core, args.offset)
+            print(f"Core {core}: {args.offset} mV")
+        except Exception as e:
+            print(f"Error setting core {core}: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 def cli_apply_list(args: argparse.Namespace) -> None:
@@ -529,10 +505,13 @@ def cli_apply_list(args: argparse.Namespace) -> None:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    successful, failed = apply_offset_to_cores(smu, core_list, args.offset)
-    print_apply_summary(successful, failed, args.offset)
-    if failed:
-        sys.exit(1)
+    for core in core_list:
+        try:
+            smu.set_core_offset(core, args.offset)
+            print(f"Core {core}: {args.offset} mV")
+        except Exception as e:
+            print(f"Error setting core {core}: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 def cli_apply_profile(args: argparse.Namespace) -> None:
@@ -661,10 +640,13 @@ def cli_profile_update(args: argparse.Namespace) -> None:
             print("Warning: Driver not loaded, cannot apply.", file=sys.stderr)
         else:
             smu = RyzenSMU()
-            successful, failed = apply_offset_to_cores(smu, core_list, args.offset)
-            print_apply_summary(successful, failed, args.offset)
-            if not failed:
-                print("Applied to CPU.")
+            for core in core_list:
+                try:
+                    smu.set_core_offset(core, args.offset)
+                    print(f"Core {core}: {args.offset} mV")
+                except Exception as e:
+                    print(f"Error applying to core {core}: {e}", file=sys.stderr)
+            print("Applied to CPU.")
 
 
 def cli_read_profile(args: argparse.Namespace) -> None:
