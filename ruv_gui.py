@@ -16,6 +16,7 @@ import json
 import shutil
 import re
 import logging
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union, Tuple
 
@@ -113,7 +114,9 @@ class RyzenSMU:
     CMD_SET_OFFSET = 0x35
     CMD_RESET_ALL = 0x36
 
-    SMU_TIMEOUT = 5.0
+    SMU_TIMEOUT = float(os.environ.get("RUV_SMU_TIMEOUT", "5.0"))
+    SMU_RETRY_ATTEMPTS = max(1, int(os.environ.get("RUV_SMU_RETRY_ATTEMPTS", "3")))
+    SMU_RETRY_DELAY = float(os.environ.get("RUV_SMU_RETRY_DELAY", "0.15"))
     MIN_OFFSET = -100
     MAX_OFFSET = 100
 
@@ -201,11 +204,34 @@ class RyzenSMU:
             raise RuntimeError("Failed to read SMU response")
         return response
 
+    def _smu_command_with_retry(self, op: int, *args: int) -> tuple:
+        """Retry SMU command for transient busy/timeout states."""
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.SMU_RETRY_ATTEMPTS + 1):
+            try:
+                return self.smu_command(op, *args)
+            except RuntimeError as e:
+                last_error = e
+                if attempt >= self.SMU_RETRY_ATTEMPTS:
+                    break
+                logger.warning(
+                    "SMU command 0x%x failed (attempt %d/%d): %s; retrying in %.2fs",
+                    op,
+                    attempt,
+                    self.SMU_RETRY_ATTEMPTS,
+                    e,
+                    self.SMU_RETRY_DELAY,
+                )
+                time.sleep(self.SMU_RETRY_DELAY)
+        raise RuntimeError(
+            f"SMU command failed after {self.SMU_RETRY_ATTEMPTS} attempts: {last_error}"
+        )
+
     def get_core_offset(self, core_id: int) -> Optional[int]:
         """Return the current voltage offset for a core (in mV)."""
         arg = ((core_id & 8) << 5 | (core_id & 7)) << 20
         try:
-            result = self.smu_command(self.CMD_GET_OFFSET, arg)
+            result = self._smu_command_with_retry(self.CMD_GET_OFFSET, arg)
         except RuntimeError:
             return None
         value = result[0]
@@ -221,14 +247,14 @@ class RyzenSMU:
         old_offset = self.get_core_offset(core_id)
         arg = (((core_id & 8) << 5 | (core_id & 7)) << 20) | (offset & 0xFFFF)
         try:
-            self.smu_command(self.CMD_SET_OFFSET, arg)
+            self._smu_command_with_retry(self.CMD_SET_OFFSET, arg)
             logger.debug("Set core %d offset to %d", core_id, offset)
         except Exception:
             # Attempt rollback
             if old_offset is not None:
                 try:
                     rollback_arg = (((core_id & 8) << 5 | (core_id & 7)) << 20) | (old_offset & 0xFFFF)
-                    self.smu_command(self.CMD_SET_OFFSET, rollback_arg)
+                    self._smu_command_with_retry(self.CMD_SET_OFFSET, rollback_arg)
                     logger.debug("Rolled back core %d to %d", core_id, old_offset)
                 except Exception as e:
                     logger.error("Rollback failed for core %d: %s", core_id, e)
@@ -236,7 +262,7 @@ class RyzenSMU:
 
     def reset_all_offsets(self) -> None:
         """Reset all core offsets to 0."""
-        self.smu_command(self.CMD_RESET_ALL, 0)
+        self._smu_command_with_retry(self.CMD_RESET_ALL, 0)
         logger.debug("Reset all offsets")
 
 
@@ -328,6 +354,95 @@ def validate_profile_name(name: str) -> bool:
     return bool(re.match(r'^[a-zA-Z0-9_.-]+$', name))
 
 
+def ensure_valid_offset(value: Any, context: str = "offset") -> int:
+    """Validate that an offset is an int within the supported range."""
+    if not isinstance(value, int):
+        raise ValueError(f"{context}: offset must be an integer")
+    if not (RyzenSMU.MIN_OFFSET <= value <= RyzenSMU.MAX_OFFSET):
+        raise ValueError(
+            f"{context}: offset {value} mV is outside allowed range "
+            f"[{RyzenSMU.MIN_OFFSET}, {RyzenSMU.MAX_OFFSET}]"
+        )
+    return value
+
+
+def validate_profile_data(data: Any) -> Dict[int, int]:
+    """Validate profile data object, returning {core_id: offset}."""
+    if not isinstance(data, dict):
+        raise ValueError("Invalid profile JSON: expected an object mapping core IDs to offsets")
+
+    validated: Dict[int, int] = {}
+    for core_str, raw_offset in data.items():
+        try:
+            core = int(core_str)
+        except (TypeError, ValueError):
+            raise ValueError(f"{core_str}: invalid core ID")
+        validated[core] = ensure_valid_offset(raw_offset, f"core {core}")
+    return validated
+
+
+def load_and_validate_profile_data(profile_path: Path) -> Dict[int, int]:
+    """Load and validate profile JSON, returning {core_id: offset}."""
+    with open(profile_path) as f:
+        data = json.load(f)
+    return validate_profile_data(data)
+
+
+def write_json_atomic(path: Path, data: Any, mode: int = 0o644) -> None:
+    """Write JSON data atomically with explicit file permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as tmp:
+            json.dump(data, tmp, indent=2)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def write_text_atomic(path: Path, content: str, mode: int = 0o644) -> None:
+    """Write text atomically with explicit file permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as tmp:
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def apply_offset_to_cores(smu: RyzenSMU, core_list: List[int], offset: int) -> Tuple[List[int], List[str]]:
+    """Apply one offset to many cores and return (successful_cores, failure_messages)."""
+    successful: List[int] = []
+    failed: List[str] = []
+    for core in core_list:
+        try:
+            smu.set_core_offset(core, offset)
+            successful.append(core)
+        except Exception as e:
+            failed.append(f"{core}: {e}")
+    return successful, failed
+
+
+def print_apply_summary(successful: List[int], failed: List[str], offset: int) -> None:
+    """Print structured summary for multi-core apply operations."""
+    if successful:
+        print(f"Applied {offset} mV to cores: {successful}")
+    if failed:
+        print("Failed cores:", file=sys.stderr)
+        for item in failed:
+            print(f"  - {item}", file=sys.stderr)
+
+
 def save_current_offsets_as_profile(name: str) -> None:
     """Save current core offsets to a profile file."""
     if not RyzenSMU.driver_loaded():
@@ -335,10 +450,8 @@ def save_current_offsets_as_profile(name: str) -> None:
     smu = RyzenSMU()
     cores = get_physical_core_ids()
     offsets = {str(core): smu.get_core_offset(core) for core in cores}
-    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     profile_path = PROFILES_DIR / f"{name}.json"
-    with open(profile_path, "w") as f:
-        json.dump(offsets, f, indent=2)
+    write_json_atomic(profile_path, offsets)
     logger.info("Profile '%s' saved.", name)
 
 
@@ -348,15 +461,9 @@ def apply_profile_file(profile_path: Path) -> None:
         raise RuntimeError("Ryzen SMU driver not loaded.")
     smu = RyzenSMU()
     cores = get_physical_core_ids()
-    with open(profile_path) as f:
-        data = json.load(f)
+    data = load_and_validate_profile_data(profile_path)
     failed = []
-    for core_str, offset in data.items():
-        try:
-            core = int(core_str)
-        except ValueError:
-            failed.append(f"{core_str}: invalid core ID")
-            continue
+    for core, offset in data.items():
         if core not in cores:
             failed.append(f"{core}: core does not exist")
             continue
@@ -408,13 +515,10 @@ def cli_set(args: argparse.Namespace) -> None:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    for core in core_list:
-        try:
-            smu.set_core_offset(core, args.offset)
-            print(f"Core {core} set to {args.offset} mV")
-        except Exception as e:
-            print(f"Error setting core {core}: {e}", file=sys.stderr)
-            sys.exit(1)
+    successful, failed = apply_offset_to_cores(smu, core_list, args.offset)
+    print_apply_summary(successful, failed, args.offset)
+    if failed:
+        sys.exit(1)
 
 
 def cli_apply_list(args: argparse.Namespace) -> None:
@@ -425,13 +529,10 @@ def cli_apply_list(args: argparse.Namespace) -> None:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    for core in core_list:
-        try:
-            smu.set_core_offset(core, args.offset)
-            print(f"Core {core} set to {args.offset} mV")
-        except Exception as e:
-            print(f"Error setting core {core}: {e}", file=sys.stderr)
-            sys.exit(1)
+    successful, failed = apply_offset_to_cores(smu, core_list, args.offset)
+    print_apply_summary(successful, failed, args.offset)
+    if failed:
+        sys.exit(1)
 
 
 def cli_apply_profile(args: argparse.Namespace) -> None:
@@ -543,17 +644,16 @@ def cli_profile_update(args: argparse.Namespace) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    with open(profile_path) as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        print("Invalid profile JSON.", file=sys.stderr)
+    try:
+        data = {str(core): offset for core, offset in load_and_validate_profile_data(profile_path).items()}
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     for core in core_list:
-        data[str(core)] = args.offset
+        data[str(core)] = ensure_valid_offset(args.offset, f"core {core}")
 
-    with open(profile_path, "w") as f:
-        json.dump(data, f, indent=2)
+    write_json_atomic(profile_path, data)
     print(f"Profile '{name}' updated for cores {core_list}.")
 
     if args.apply:
@@ -561,13 +661,10 @@ def cli_profile_update(args: argparse.Namespace) -> None:
             print("Warning: Driver not loaded, cannot apply.", file=sys.stderr)
         else:
             smu = RyzenSMU()
-            for core in core_list:
-                try:
-                    smu.set_core_offset(core, args.offset)
-                    print(f"Core {core} set to {args.offset} mV")
-                except Exception as e:
-                    print(f"Error applying to core {core}: {e}", file=sys.stderr)
-            print("Applied to CPU.")
+            successful, failed = apply_offset_to_cores(smu, core_list, args.offset)
+            print_apply_summary(successful, failed, args.offset)
+            if not failed:
+                print("Applied to CPU.")
 
 
 def cli_read_profile(args: argparse.Namespace) -> None:
@@ -668,7 +765,7 @@ def cli_boot_status(args: argparse.Namespace) -> None:
 def cli_mode(cli_args: List[str]) -> None:
     """Parse CLI arguments and execute the requested command."""
     parser = argparse.ArgumentParser(
-        prog="ruv",
+        prog="ruv-gui",
         description="Ryzen SMU voltage control – CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -679,17 +776,17 @@ Core specifications can be:
   - combination:   0,2-5,7
 
 Examples:
-  sudo ruv status
-  sudo ruv get 0-3
-  sudo ruv set 2 -30
-  sudo ruv apply-list 0-7 -40
-  sudo ruv apply myprofile
-  sudo ruv profile list
-  sudo ruv profile save gaming
-  sudo ruv profile read gaming
-  sudo ruv profile update gaming --cores 0,2,4 --offset -35 --apply
-  sudo ruv boot enable gaming
-  sudo ruv reset
+  sudo ruv-gui status
+  sudo ruv-gui get 0-3
+  sudo ruv-gui set 2 -30
+  sudo ruv-gui apply-list 0-7 -40
+  sudo ruv-gui apply myprofile
+  sudo ruv-gui profile list
+  sudo ruv-gui profile save gaming
+  sudo ruv-gui profile read gaming
+  sudo ruv-gui profile update gaming --cores 0,2,4 --offset -35 --apply
+  sudo ruv-gui boot enable gaming
+  sudo ruv-gui reset
         """
     )
     parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
@@ -764,6 +861,8 @@ Examples:
     write_profile_parser.add_argument("file", type=str)
     delete_profile_file_parser = subparsers.add_parser("delete-profile-file", help=argparse.SUPPRESS)
     delete_profile_file_parser.add_argument("file", type=str)
+    delete_profile_and_reset_parser = subparsers.add_parser("delete-profile-and-reset", help=argparse.SUPPRESS)
+    delete_profile_and_reset_parser.add_argument("file", type=str)
     save_profile_combined = subparsers.add_parser("save-profile-combined", help=argparse.SUPPRESS)
     save_profile_combined.add_argument("name", help="Profile name")
     install_boot_service_parser = subparsers.add_parser("install-boot-service", help=argparse.SUPPRESS)
@@ -775,44 +874,47 @@ Examples:
     # ------------------------------------------------------------------
     # Internal privileged commands (called via pkexec)
     # ------------------------------------------------------------------
-    if args.command == "read-profile":
-        cli_read_profile(args)
-        return
-
-    if args.command == "write-profile":
-        path = Path(args.file).resolve()
+    def _resolve_profile_path(raw_path: str) -> Path:
+        path = Path(raw_path).resolve()
         try:
             path.relative_to(PROFILES_DIR)
         except ValueError:
             print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
             sys.exit(1)
+        return path
+
+    def _handle_write_profile() -> None:
+        path = _resolve_profile_path(args.file)
         try:
             data = sys.stdin.read()
-            json.loads(data)  # validate
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w") as f:
-                f.write(data)
+            parsed = json.loads(data)
+            validate_profile_data(parsed)
+            write_text_atomic(path, data)
         except Exception as e:
             print(f"Error writing profile: {e}", file=sys.stderr)
             sys.exit(1)
-        return
 
-    if args.command == "delete-profile-file":
-        path = Path(args.file).resolve()
-        try:
-            path.relative_to(PROFILES_DIR)
-        except ValueError:
-            print(f"Error: Profile file {path} is not under {PROFILES_DIR}", file=sys.stderr)
-            sys.exit(1)
+    def _handle_delete_profile_file() -> None:
+        path = _resolve_profile_path(args.file)
         try:
             if path.exists():
                 path.unlink()
         except Exception as e:
             print(f"Error deleting profile: {e}", file=sys.stderr)
             sys.exit(1)
-        return
 
-    if args.command == "save-profile-combined":
+    def _handle_delete_profile_and_reset() -> None:
+        path = _resolve_profile_path(args.file)
+        try:
+            smu = RyzenSMU()
+            smu.reset_all_offsets()
+            if path.exists():
+                path.unlink()
+        except Exception as e:
+            print(f"Error deleting profile and resetting offsets: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    def _handle_save_profile_combined() -> None:
         name = args.name.strip()
         if not validate_profile_name(name):
             print("Invalid profile name.", file=sys.stderr)
@@ -823,22 +925,19 @@ Examples:
         except Exception as e:
             print(f"Error saving profile: {e}", file=sys.stderr)
             sys.exit(1)
-        return
 
-    if args.command == "install-boot-service":
-        service_path = args.service_path
+    def _handle_install_boot_service() -> None:
+        service_path = Path(args.service_path)
         service_content = sys.stdin.read()
         try:
-            with open(service_path, "w") as f:
-                f.write(service_content)
+            write_text_atomic(service_path, service_content)
             subprocess.run(["systemctl", "daemon-reload"], check=True)
             subprocess.run(["systemctl", "enable", "ruv-boot.service"], check=True)
         except Exception as e:
             print(f"Error installing boot service: {e}", file=sys.stderr)
             sys.exit(1)
-        return
 
-    if args.command == "remove-boot-service":
+    def _handle_remove_boot_service() -> None:
         try:
             subprocess.run(["systemctl", "disable", "ruv-boot.service"], check=True, capture_output=True)
             service_path = "/etc/systemd/system/ruv-boot.service"
@@ -848,6 +947,18 @@ Examples:
         except Exception as e:
             print(f"Error removing boot service: {e}", file=sys.stderr)
             sys.exit(1)
+
+    internal_handlers = {
+        "read-profile": lambda: cli_read_profile(args),
+        "write-profile": _handle_write_profile,
+        "delete-profile-file": _handle_delete_profile_file,
+        "delete-profile-and-reset": _handle_delete_profile_and_reset,
+        "save-profile-combined": _handle_save_profile_combined,
+        "install-boot-service": _handle_install_boot_service,
+        "remove-boot-service": _handle_remove_boot_service,
+    }
+    if args.command in internal_handlers:
+        internal_handlers[args.command]()
         return
 
     # Alias 'list' -> 'status'
@@ -864,18 +975,17 @@ Examples:
         print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
         sys.exit(1)
 
-    if args.command == "status":
-        cli_status(args)
-    elif args.command == "get":
-        cli_get(args)
-    elif args.command == "set":
-        cli_set(args)
-    elif args.command == "apply-list":
-        cli_apply_list(args)
-    elif args.command == "apply":
-        cli_apply_profile(args)
-    elif args.command == "reset":
-        cli_reset(args)
+    command_handlers = {
+        "status": cli_status,
+        "get": cli_get,
+        "set": cli_set,
+        "apply-list": cli_apply_list,
+        "apply": cli_apply_profile,
+        "reset": cli_reset,
+    }
+
+    if args.command in command_handlers:
+        command_handlers[args.command](args)
     elif args.command == "profile":
         if args.profile_cmd == "list":
             cli_profile_list(args)
@@ -889,8 +999,6 @@ Examples:
             cli_profile_read(args)
         elif args.profile_cmd == "update":
             cli_profile_update(args)
-    elif args.command == "read-profile":
-        cli_read_profile(args)
     elif args.command == "boot":
         if args.boot_cmd == "enable":
             cli_boot_enable(args)
@@ -1142,6 +1250,7 @@ if GUI_AVAILABLE:
             def on_finish(output):
                 self.output.setText(output)
                 self.offset_spin.setValue(0)
+                self.list_offsets()
             self._run_privileged_async(["reset"], on_finish)
 
         def apply_offset(self):
@@ -1197,34 +1306,11 @@ if GUI_AVAILABLE:
                 return
             json_path = PROFILES_DIR / f"{name}.json"
 
-            class CombinedWorker(QThread):
-                finished = pyqtSignal(str)
-                error = pyqtSignal(str)
-
-                def run(self):
-                    try:
-                        PrivilegedRunner.run(["reset"])
-                        PrivilegedRunner.run(["delete-profile-file", str(json_path)])
-                        self.finished.emit(f"Profile '{name}' deleted and offsets reset.")
-                    except Exception as e:
-                        self.error.emit(str(e))
-
-            self._set_busy(True)
-            worker = CombinedWorker()
-
-            def on_done(msg):
-                self.output.setText(msg)
+            def on_done(_output):
+                self.output.setText(f"Profile '{name}' deleted and offsets reset.")
                 self.refresh_profile_list()
-                self._set_busy(False)
 
-            def on_err(err):
-                self.output.setText(f"Error: {err}")
-                self._set_busy(False)
-
-            worker.finished.connect(on_done)
-            worker.error.connect(on_err)
-            worker.start()
-            self.workers.append(worker)
+            self._run_privileged_async(["delete-profile-and-reset", str(json_path)], on_done)
 
         def apply_profile(self):
             name = self.profile_combo.currentText()
@@ -1257,9 +1343,8 @@ if GUI_AVAILABLE:
 
             def on_read_profile(raw_json):
                 try:
-                    data = json.loads(raw_json)
-                    if not isinstance(data, dict):
-                        raise ValueError("Invalid JSON")
+                    parsed = json.loads(raw_json)
+                    data = {str(core): offset for core, offset in validate_profile_data(parsed).items()}
                     for core in selected:
                         data[str(core)] = new_offset
                     json_text = json.dumps(data, indent=2)
@@ -1275,6 +1360,7 @@ if GUI_AVAILABLE:
                             def on_apply_done(output):
                                 self.output.setText(f"Profile updated and applied.\n{output}")
                                 self.offset_spin.setValue(0)
+                                self.list_offsets()
                             self._run_privileged_async(["apply-file", str(json_path)], on_apply_done)
                         else:
                             self.output.setText(f"Profile '{name}' updated (not applied).")
