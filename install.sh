@@ -39,14 +39,14 @@ fi
 
 # Install man page
 echo "Installing man page..."
-if [ -f "$SCRIPT_DIR/ruv.1" ]; then
-    install -Dm 644 "$SCRIPT_DIR/ruv.1" /usr/share/man/man1/ruv.1
-    gzip -f /usr/share/man/man1/ruv.1
-    echo "Man page installed as /usr/share/man/man1/ruv.1.gz"
+if [ -f "$SCRIPT_DIR/ruv-gui.1" ]; then
+    install -Dm 644 "$SCRIPT_DIR/ruv-gui.1" /usr/share/man/man1/ruv-gui.1
+    gzip -f /usr/share/man/man1/ruv-gui.1
+    echo "Man page installed as /usr/share/man/man1/ruv-gui.1.gz"
 else
-    echo "Warning: ruv.1 not found in $SCRIPT_DIR – skipping man page installation."
+    echo "Warning: ruv-gui.1 not found in $SCRIPT_DIR – skipping man page installation."
 fi
 
 echo "Installation complete!"
-echo "You can now run 'ruv-gui' from the application menu or 'ruv' from the terminal."
-echo "View the manual with: man ruv"
+echo "You can now run 'ruv-gui' from the application menu or terminal."
+echo "View the manual with: man ruv-gui"
