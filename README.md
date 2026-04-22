@@ -70,7 +70,7 @@ sudo ruv-gui status
 ```bash
 sudo ruv-gui get <cores>
 ```
-##### Set offset for a number of cores
+##### Set offset for a specific number of cores
 ```bash
 sudo ruv-gui set <cores> <offset>
 ```
@@ -94,6 +94,18 @@ sudo ruv-gui profile apply <profile-name>
 ##### Read a profile (outputs JSON)
 ```bash
 sudo ruv-gui profile read <profile-name>
+```
+##### Update specific cores in a profile
+```bash
+sudo ruv-gui profile update <name> --cores <cores> --offset <offset>
+```
+##### Update a profile and apply immediately
+```bash
+sudo ruv-gui profile update <name> --cores <cores> --offset <offset> --apply
+```
+##### Delete a profile (also resets offsets)
+```bash
+sudo ruv-gui profile delete <name>
 ```
 ### Managing Boot Profiles
 ##### Enable a Profile at Boot
