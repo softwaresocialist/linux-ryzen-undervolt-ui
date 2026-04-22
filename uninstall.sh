@@ -12,9 +12,14 @@ rm -f /usr/share/applications/ruv-gui.desktop
 rm -f /usr/share/icons/hicolor/256x256/apps/ruv-gui.png
 
 # Remove man page
+if [ -f /usr/share/man/man1/ruv-gui.1.gz ]; then
+    rm -f /usr/share/man/man1/ruv-gui.1.gz
+    echo "Man page removed."
+fi
+# Legacy cleanup from older package names
 if [ -f /usr/share/man/man1/ruv.1.gz ]; then
     rm -f /usr/share/man/man1/ruv.1.gz
-    echo "Man page removed."
+    echo "Legacy man page removed."
 fi
 
 # Update icon cache (optional but good practice)
@@ -23,9 +28,10 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 
 # Remove systemd boot service if present
-if systemctl list-unit-files | grep -q ruv-boot.service; then
+if systemctl is-enabled ruv-boot.service >/dev/null 2>&1 || [ -f /etc/systemd/system/ruv-boot.service ]; then
     echo "Disabling and removing boot service..."
     systemctl disable ruv-boot.service 2>/dev/null || true
+    systemctl stop ruv-boot.service 2>/dev/null || true
     rm -f /etc/systemd/system/ruv-boot.service
     systemctl daemon-reload
 fi
