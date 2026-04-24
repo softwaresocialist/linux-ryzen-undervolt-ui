@@ -17,6 +17,8 @@ import shutil
 import re
 import logging
 import tempfile
+import fcntl
+import atexit
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -35,6 +37,9 @@ INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"
 PROFILES_DIR = Path("/etc/ruv/profiles")
 ICON_FALLBACK_PATH = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
 
+# Lock file to prevent concurrent privileged operations
+LOCK_FILE = "/var/run/ruv.lock"
+
 # PyQt6 imports (only needed for GUI mode)
 try:
     from PyQt6.QtWidgets import (
@@ -52,6 +57,45 @@ except ImportError:
     if len(sys.argv) == 1:
         print("PyQt6 is required for the GUI. Please install it or use the CLI.", file=sys.stderr)
         sys.exit(1)
+
+
+# ----------------------------------------------------------------------
+# Concurrency guard (privileged operations only)
+# ----------------------------------------------------------------------
+_lock_fd = None
+
+def acquire_lock():
+    """Acquire an exclusive lock to prevent concurrent SMU access."""
+    global _lock_fd
+    if os.geteuid() != 0:
+        return  # Only root processes need locking
+
+    try:
+        _lock_fd = open(LOCK_FILE, "w")
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Write PID for informational purposes
+        _lock_fd.write(str(os.getpid()))
+        _lock_fd.flush()
+        atexit.register(release_lock)
+    except (IOError, OSError) as e:
+        print("Error: Another instance of ruv is already running (SMU access locked). "
+              "Please wait for it to finish.", file=sys.stderr)
+        sys.exit(1)
+
+def release_lock():
+    global _lock_fd
+    if _lock_fd:
+        try:
+            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+            _lock_fd.close()
+        except Exception:
+            pass
+        finally:
+            _lock_fd = None
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
 
 
 # ----------------------------------------------------------------------
@@ -99,7 +143,12 @@ class PrivilegedRunner:
 # Ryzen SMU driver interface
 # ----------------------------------------------------------------------
 class RyzenSMU:
-    """Interface to the ryzen_smu sysfs driver."""
+    """
+    Interface to the ryzen_smu sysfs driver.
+
+    WARNING: The SMU communication is NOT thread- or process-safe.
+    Do not run multiple instances of this tool concurrently.
+    """
 
     FS_PATH = Path("/sys/kernel/ryzen_smu_drv/")
     VER_PATH = FS_PATH / "version"
@@ -268,7 +317,10 @@ class RyzenSMU:
 def get_physical_core_ids() -> List[int]:
     """
     Return a sorted list of physical core IDs available on the system.
-    Uses sysfs topology; falls back to /proc/cpuinfo or a safe default.
+
+    NOTE: This uses Linux topology core_ids, which *may* differ from the
+    numbering expected by the ryzen_smu driver on certain kernels.
+    If offsets don't seem to apply correctly, verify the mapping.
     """
     cpu_path = Path("/sys/devices/system/cpu")
     core_ids = set()
@@ -746,6 +798,10 @@ def cli_boot_status(args: argparse.Namespace) -> None:
 # ----------------------------------------------------------------------
 def cli_mode(cli_args: List[str]) -> None:
     """Parse CLI arguments and execute the requested command."""
+
+    # Acquire lock to prevent concurrent privileged operations
+    acquire_lock()
+
     parser = argparse.ArgumentParser(
         prog="ruv-gui",
         description="Ryzen SMU voltage control – CLI",
@@ -757,11 +813,14 @@ Core specifications can be:
   - range:         0-7
   - combination:   0,2-5,7
 
+NOTE: For negative offsets with 'apply-list', use '--' before the offset:
+  sudo ruv-gui apply-list 0,1 -- -30
+
 Examples:
   sudo ruv-gui status
   sudo ruv-gui get 0-3
   sudo ruv-gui set 2 -30
-  sudo ruv-gui apply-list 0-7 -40
+  sudo ruv-gui apply-list 0-7 -- -40
   sudo ruv-gui apply myprofile
   sudo ruv-gui profile list
   sudo ruv-gui profile save gaming
@@ -786,16 +845,17 @@ Examples:
     # set
     set_parser = subparsers.add_parser("set", help="Set offset for one or more cores")
     set_parser.add_argument("core", help="Core specification")
-    set_parser.add_argument("offset", type=int, help="Offset in mV")
+    set_parser.add_argument("offset", type=int, help="Offset in mV (negative values require '--' before the offset: -- -30)")
 
     # apply-list
     apply_list_parser = subparsers.add_parser(
         "apply-list",
         help="Apply the same offset to multiple cores without saving a profile",
-        description="Set the given offset (mV) for a list of core IDs."
+        description="Set the given offset (mV) for a list of core IDs. "
+                    "For negative offsets, place '--' before the offset: e.g., -- -30."
     )
     apply_list_parser.add_argument("cores", help="Core specification")
-    apply_list_parser.add_argument("offset", type=int, help="Offset in mV")
+    apply_list_parser.add_argument("offset", type=int, help="Offset in mV (use '--' for negative: -- -30)")
 
     # apply (profile)
     apply_parser = subparsers.add_parser("apply", help="Apply a saved profile by name")
@@ -823,7 +883,7 @@ Examples:
     profile_update.add_argument("--offset", type=int, required=True, help="New offset in mV")
     profile_update.add_argument("--apply", action="store_true", help="Also apply the updated offsets to CPU immediately")
 
-    # read-profile (standalone, kept for compatibility but can be hidden)
+    # read-profile (standalone, kept for compatibility but hidden)
     read_profile_parser = subparsers.add_parser("read-profile", help="Display JSON of a profile file (deprecated)")
     read_profile_parser.add_argument("file", help="Path to profile JSON file (under /etc/ruv/profiles/)")
 
@@ -969,31 +1029,34 @@ Examples:
     if args.command in command_handlers:
         command_handlers[args.command](args)
     elif args.command == "profile":
-        if args.profile_cmd == "list":
-            cli_profile_list(args)
-        elif args.profile_cmd == "save":
-            cli_profile_save(args)
-        elif args.profile_cmd == "delete":
-            cli_profile_delete(args)
-        elif args.profile_cmd == "apply":
-            cli_profile_apply(args)
-        elif args.profile_cmd == "read":
-            cli_profile_read(args)
-        elif args.profile_cmd == "update":
-            cli_profile_update(args)
+        profile_handlers = {
+            "list": cli_profile_list,
+            "save": cli_profile_save,
+            "delete": cli_profile_delete,
+            "apply": cli_profile_apply,
+            "read": cli_profile_read,
+            "update": cli_profile_update,
+        }
+        if args.profile_cmd in profile_handlers:
+            profile_handlers[args.profile_cmd](args)
+        else:
+            parser.print_help()
     elif args.command == "boot":
-        if args.boot_cmd == "enable":
-            cli_boot_enable(args)
-        elif args.boot_cmd == "disable":
-            cli_boot_disable(args)
-        elif args.boot_cmd == "status":
-            cli_boot_status(args)
+        boot_handlers = {
+            "enable": cli_boot_enable,
+            "disable": cli_boot_disable,
+            "status": cli_boot_status,
+        }
+        if args.boot_cmd in boot_handlers:
+            boot_handlers[args.boot_cmd](args)
+        else:
+            parser.print_help()
     else:
         parser.print_help()
 
 
 # ----------------------------------------------------------------------
-# GUI components (unchanged from original, but included for completeness)
+# GUI components
 # ----------------------------------------------------------------------
 if GUI_AVAILABLE:
 
@@ -1232,7 +1295,7 @@ if GUI_AVAILABLE:
             def on_finish(output):
                 self.output.setText(output)
                 self.offset_spin.setValue(0)
-                self.list_offsets()
+                # No automatic refresh to avoid second pkexec prompt
             self._run_privileged_async(["reset"], on_finish)
 
         def apply_offset(self):
@@ -1241,12 +1304,11 @@ if GUI_AVAILABLE:
                 self.output.setText("No cores selected.")
                 return
             offset = self.offset_spin.value()
-            # Use apply-list with core list as comma-separated string
             args = ["apply-list", ",".join(map(str, selected)), str(offset)]
 
             def on_finish(output):
                 self.output.setText(output)
-                self.offset_spin.setValue(0)
+                # Do not reset spinbox so user can try another offset easily
             self._run_privileged_async(args, on_finish)
 
         def refresh_profile_list(self):
@@ -1334,16 +1396,17 @@ if GUI_AVAILABLE:
                     def on_write_done(msg):
                         reply = QMessageBox.question(
                             self, "Apply Updated Profile",
-                            f"Profile '{name}' updated. Apply to CPU now?",
+                            f"Profile '{name}' updated. Apply updated cores to CPU now?",
                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                             QMessageBox.StandardButton.Yes
                         )
                         if reply == QMessageBox.StandardButton.Yes:
+                            # Apply only the cores we just changed
+                            apply_args = ["apply-list", ",".join(map(str, selected)), str(new_offset)]
                             def on_apply_done(output):
-                                self.output.setText(f"Profile updated and applied.\n{output}")
+                                self.output.setText(f"Profile updated and applied to selected cores.\n{output}")
                                 self.offset_spin.setValue(0)
-                                self.list_offsets()
-                            self._run_privileged_async(["apply-file", str(json_path)], on_apply_done)
+                            self._run_privileged_async(apply_args, on_apply_done)
                         else:
                             self.output.setText(f"Profile '{name}' updated (not applied).")
                             self.offset_spin.setValue(0)
@@ -1423,9 +1486,6 @@ if __name__ == "__main__":
         if not GUI_AVAILABLE:
             print("PyQt6 is required for the GUI.", file=sys.stderr)
             sys.exit(1)
-
-        # Suppress Qt theme warnings
-        os.environ["QT_LOGGING_RULES"] = "qt.qpa.theme=false"
 
         QApplication.setApplicationName("Ryzen Undervolt Tool")
         QApplication.setApplicationDisplayName("Ryzen Undervolt Tool")
