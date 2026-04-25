@@ -23,8 +23,7 @@ Only processors that are supported by the Ryzen SMU driver should work.
 
 ## Installation
 ### 1. Install the Ryzen SMU driver
-
-https://github.com/amkillam/ryzen_smu
+https://github.com/amkillam/ryzen_smu#installation
 ### 2. Install and remove the tool
 #### 2.1 Install
 ```bash
