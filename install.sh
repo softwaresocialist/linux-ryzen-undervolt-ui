@@ -29,6 +29,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Installing ruv-gui script..."
 install -Dm 755 "$SCRIPT_DIR/ruv_gui.py" /usr/local/bin/ruv-gui
 
+# Make uninstall script executable
+echo "Making uninstall.sh executable"
+chmod +x unistall.sh
+
 # Desktop integration
 echo "Installing desktop file and icon..."
 install -Dm 644 "$SCRIPT_DIR/ruv-gui.desktop" /usr/share/applications/ruv-gui.desktop
