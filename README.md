@@ -10,7 +10,7 @@ Allows reading and setting voltage offsets per core.
 
 WARNING:
 Incorrect offsets may cause system instability or damage. Use at your own risk.
-Only processors that are supported by the Ryzen SMU driver should work.
+Only processors that are supported by the Ryzen SMU driver should work. ONLY RYZEN 5000 is suppoerted right now (9000 is being worked on)
 ## Prerequisites
 
     - Ryzen CPU
