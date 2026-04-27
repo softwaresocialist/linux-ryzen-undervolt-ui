@@ -35,7 +35,6 @@ sudo ./install.sh
 #### 2.2 Remove
 ```bash
 cd linux-ryzen-undervolt-ui
-chmod +x uninstall.sh
 sudo ./uninstall.sh
 ```
 ### Run the GUI
