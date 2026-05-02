@@ -5,7 +5,7 @@ Early development – expect bugs. AI‑assisted code.
 ## What is it?
 
 Linux Undervolt Tool for Ryzen CPUs using the Ryzen SMU kernel driver.
-Allows reading and setting voltage offsets per core. It currently supports ryzen 5000 and ryzn 9000
+Allows reading and setting voltage offsets per core. It currently supports ryzen 5000 and ryzen 9000
 ## DISCLAIMER
 
 WARNING:
