@@ -10,6 +10,7 @@ echo "Checking dependencies..."
 command -v python3 >/dev/null 2>&1 || { echo "Python3 is required. Abort."; exit 1; }
 python3 -c "import PyQt6" 2>/dev/null || { echo "PyQt6 is not installed."; exit 1; }
 command -v pkexec >/dev/null 2>&1 || { echo "pkexec (polkit) is required."; exit 1; }
+command -v gzip >/dev/null 2>&1 || { echo "gzip is required."; exit 1; }
 
 echo "Checking for ryzen_smu driver..."
 if [ ! -f "/sys/kernel/ryzen_smu_drv/version" ]; then
