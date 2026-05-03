@@ -27,7 +27,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 
 # ----------------------------------------------------------------------------
-# Logging (debug mode: RUV_DEBUG=1)
+# Logging
 # ----------------------------------------------------------------------------
 log_level = logging.DEBUG if os.environ.get("RUV_DEBUG") == "1" else logging.INFO
 logging.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -37,14 +37,13 @@ logger = logging.getLogger("ruv")
 # Constants
 # ----------------------------------------------------------------------------
 SCRIPT_PATH = Path(__file__).resolve()
-INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"          # CLI tool path after installation
+INSTALLED_BIN_PATH = "/usr/local/bin/ruv-gui"
 PROFILES_DIR = Path("/etc/ruv/profiles")
 ICON_FALLBACK_PATH = "/usr/share/icons/hicolor/256x256/apps/ruv-gui.png"
-LOCK_FILE = "/var/run/ruv.lock"                        # concurrency guard for privileged ops
-CACHE_DIR = Path("/var/cache/ruv")                     # better than /etc/ruv for non‑config cache
+LOCK_FILE = "/var/run/ruv.lock"
+CACHE_DIR = Path("/var/cache/ruv")
 CO_CACHE_FILE = CACHE_DIR / "co_cache.json"
 
-# PyQt6 – only needed for the GUI
 try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QPushButton,
@@ -58,30 +57,21 @@ try:
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
-    if len(sys.argv) == 1:                  # no arguments → user tried to launch GUI
+    if len(sys.argv) == 1:
         print("PyQt6 is required for the GUI. Please install it or use the CLI.", file=sys.stderr)
         sys.exit(1)
 
-# ----------------------------------------------------------------------------
-# Concurrency guard (privileged operations only)
-# ----------------------------------------------------------------------------
 _lock_fd: Optional[int] = None
 
 def acquire_lock() -> None:
-    """
-    Acquire an exclusive lock to prevent concurrent SMU access.
-    The lock file is created and kept until the process exits; it will be
-    cleaned up by the OS (tmpfs) on reboot if still present.
-    """
     global _lock_fd
     if os.geteuid() != 0:
-        return                         # only root processes compete
+        return
     try:
         _lock_fd = open(LOCK_FILE, "w")
         fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _lock_fd.write(str(os.getpid()))
         _lock_fd.flush()
-        # IMPORTANT: Do NOT unlink the file – that would break mutual exclusion.
         atexit.register(release_lock)
     except (IOError, OSError):
         print("Error: Another instance of ruv is already running (SMU access locked). "
@@ -89,7 +79,6 @@ def acquire_lock() -> None:
         sys.exit(1)
 
 def release_lock() -> None:
-    """Release the SMU access lock. Called automatically at exit."""
     global _lock_fd
     if _lock_fd:
         try:
@@ -99,18 +88,12 @@ def release_lock() -> None:
             pass
         finally:
             _lock_fd = None
-        # Remove the lock file only after releasing (good practice, but not required)
         try:
             os.unlink(LOCK_FILE)
         except Exception:
             pass
 
-# ----------------------------------------------------------------------------
-# Privileged execution helper (pkexec / direct root)
-# ----------------------------------------------------------------------------
 class PrivilegedRunner:
-    """Run commands with elevated privileges using pkexec or directly as root."""
-
     @staticmethod
     def run(args: List[str], input_text: Optional[str] = None) -> str:
         if os.geteuid() != 0 and not shutil.which("pkexec"):
@@ -132,14 +115,7 @@ class PrivilegedRunner:
         logger.debug("Privileged command succeeded: %s", args)
         return result.stdout
 
-# ----------------------------------------------------------------------------
-# CPU model detection fallback (when codename file is ambiguous)
-# ----------------------------------------------------------------------------
 def detect_generation_from_cpuinfo() -> Optional['RyzenSMU.Generation']:
-    """
-    Try to determine the Ryzen generation from /proc/cpuinfo model name.
-    Returns a Generation or None if detection fails.
-    """
     try:
         with open("/proc/cpuinfo") as f:
             for line in f:
@@ -147,37 +123,24 @@ def detect_generation_from_cpuinfo() -> Optional['RyzenSMU.Generation']:
                     name = line.split(":", 1)[1].strip().lower()
                     if "ryzen" not in name:
                         continue
-                    # Example: "ryzen 7 5700x3d" → series=7, model=5700
                     match = re.search(r'ryzen\s+(\d)\s*(\d{3,4})?', name)
                     if not match or match.group(2) is None:
                         continue
                     model_str = match.group(2)
                     model = int(model_str)
-                    prefix = model // 1000   # first digit of model number
-                    # Mapping: 5xxx -> Vermeer, 7xxx -> Raphael, 9xxx -> Granite Ridge
+                    prefix = model // 1000
                     if prefix == 5:
                         return RyzenSMU.Generation.VERMEER
                     if prefix == 7:
                         return RyzenSMU.Generation.RAPHAEL
                     if prefix == 9:
                         return RyzenSMU.Generation.GRANITE_RIDGE
-        # nothing matched
         logger.debug("No known Ryzen model found in /proc/cpuinfo")
     except Exception as e:
         logger.debug("Failed to read /proc/cpuinfo: %s", e)
     return None
 
-# ----------------------------------------------------------------------------
-# Ryzen SMU driver interface
-# ----------------------------------------------------------------------------
 class RyzenSMU:
-    """
-    Interface to the ryzen_smu sysfs driver.
-    Auto‑detects CPU generation and adapts SMU commands.
-
-    !!! Not thread/process‑safe. The provided lock must be held.
-    """
-
     FS_PATH = Path("/sys/kernel/ryzen_smu_drv/")
     VER_PATH = FS_PATH / "version"
     CODENAME_PATH = FS_PATH / "codename"
@@ -185,28 +148,25 @@ class RyzenSMU:
     MP1_CMD = FS_PATH / "mp1_smu_cmd"
 
     class Generation(Enum):
-        VERMEER = "vermeer"               # Ryzen 5000
-        GRANITE_RIDGE = "granite_ridge"   # Ryzen 9000
-        RAPHAEL = "raphael"               # Ryzen 7000 (unsupported)
+        VERMEER = "vermeer"
+        GRANITE_RIDGE = "granite_ridge"
+        RAPHAEL = "raphael"
         UNSUPPORTED = "unsupported"
 
-    # Codename numbers from the driver codename file
     CODENAME_MAP = {
         25: Generation.VERMEER,
         12: Generation.VERMEER,
         19: Generation.VERMEER,
         24: Generation.GRANITE_RIDGE,
-        23: Generation.GRANITE_RIDGE,  # Ryzen 9 9950X3D (Granite Ridge)
+        23: Generation.GRANITE_RIDGE,
         17: Generation.RAPHAEL,
     }
 
-    # SMU opcodes
     V_GET_OFFSET    = 0x48
     V_SET_OFFSET    = 0x35
     V_RESET_ALL     = 0x36
-    GR_SET_OFFSET_BASE = 0x50              # 0x50 + core index
+    GR_SET_OFFSET_BASE = 0x50
 
-    # Tuning via environment
     SMU_TIMEOUT = float(os.environ.get("RUV_SMU_TIMEOUT", "5.0"))
     SMU_RETRY_ATTEMPTS = max(1, int(os.environ.get("RUV_SMU_RETRY_ATTEMPTS", "3")))
     SMU_RETRY_DELAY = float(os.environ.get("RUV_SMU_RETRY_DELAY", "0.15"))
@@ -218,7 +178,6 @@ class RyzenSMU:
         if not self.driver_loaded():
             raise RuntimeError("Ryzen SMU driver not loaded. Load with: sudo modprobe ryzen_smu")
         self.generation = self._detect_generation()
-        # Now core_id_list holds APIC IDs (sorted) for linear core mapping
         self.core_id_list = get_physical_apic_ids_sorted()
         self.core_count = len(self.core_id_list)
         self.co_cache: Dict[int, int] = {}
@@ -226,9 +185,6 @@ class RyzenSMU:
             self._load_co_cache()
         logger.debug("RyzenSMU initialized. Gen: %s, cores: %d", self.generation.value, self.core_count)
 
-    # ------------------------------------------------------------------
-    # Sysfs helpers
-    # ------------------------------------------------------------------
     @classmethod
     def driver_loaded(cls) -> bool:
         return cls.VER_PATH.is_file()
@@ -269,12 +225,7 @@ class RyzenSMU:
         data = struct.pack("<IIIIII", *values)
         return cls._write_file(file, data) == 24
 
-    # ------------------------------------------------------------------
-    # SMU command execution
-    # ------------------------------------------------------------------
     def smu_command(self, op: int, arg1=0, arg2=0, arg3=0, arg4=0, arg5=0, arg6=0) -> Tuple[int, ...]:
-        """Execute a raw SMU command. Blocks until completion or timeout."""
-        # Wait for ready
         start = time.monotonic()
         while True:
             status = self._read_file32(self.MP1_CMD)
@@ -288,13 +239,11 @@ class RyzenSMU:
                 raise RuntimeError("Timeout waiting for SMU ready. Driver may be busy.")
             time.sleep(0.05)
 
-        # Write arguments and opcode
         if not self._write_file192(self.SMU_ARGS, arg1, arg2, arg3, arg4, arg5, arg6):
             raise RuntimeError("Failed to write SMU arguments")
         if not self._write_file32(self.MP1_CMD, op):
             raise RuntimeError("Failed to write SMU command")
 
-        # Wait for completion
         start = time.monotonic()
         while True:
             status = self._read_file32(self.MP1_CMD)
@@ -314,7 +263,6 @@ class RyzenSMU:
         return response
 
     def _smu_command_with_retry(self, op: int, *args: int) -> Tuple[int, ...]:
-        """SMU command with automatic retries on failure."""
         last_error: Optional[Exception] = None
         for attempt in range(1, self.SMU_RETRY_ATTEMPTS + 1):
             try:
@@ -332,11 +280,7 @@ class RyzenSMU:
             f"SMU command failed after {self.SMU_RETRY_ATTEMPTS} attempts: {last_error}"
         )
 
-    # ------------------------------------------------------------------
-    # Per‑core offset operations
-    # ------------------------------------------------------------------
     def get_core_offset(self, core_index: int) -> Optional[int]:
-        """Read the current voltage offset (mV) for the given linear core index."""
         if core_index < 0 or core_index >= self.core_count:
             raise ValueError(f"Core index {core_index} out of range (0-{self.core_count-1})")
 
@@ -352,11 +296,9 @@ class RyzenSMU:
                 value -= 2**32
             return value
         elif self.generation in (self.Generation.GRANITE_RIDGE, self.Generation.RAPHAEL):
-            # Write-only hardware; return whatever we have in cache
             return self.co_cache.get(core_index, 0)
 
     def set_core_offset(self, core_index: int, offset: int) -> None:
-        """Set the voltage offset for a single linear core index."""
         if not (self.MIN_OFFSET <= offset <= self.MAX_OFFSET):
             raise ValueError(f"Offset {offset} mV out of range [{self.MIN_OFFSET}, {self.MAX_OFFSET}]")
         if core_index < 0 or core_index >= self.core_count:
@@ -364,14 +306,12 @@ class RyzenSMU:
 
         if self.generation == self.Generation.VERMEER:
             apic_id = self.core_id_list[core_index]
-            # Save old offset for rollback
             old_offset = self.get_core_offset(core_index)
             arg = (((apic_id & 8) << 5 | (apic_id & 7)) << 20) | (offset & 0xFFFF)
             try:
                 self._smu_command_with_retry(self.V_SET_OFFSET, arg)
                 logger.debug("Set core %d (APIC %d) → %d mV", core_index, apic_id, offset)
             except Exception:
-                # Try to restore previous value
                 if old_offset is not None:
                     try:
                         rollback_arg = (((apic_id & 8) << 5 | (apic_id & 7)) << 20) | (old_offset & 0xFFFF)
@@ -389,13 +329,11 @@ class RyzenSMU:
                 self._save_co_cache()
                 logger.debug("Set core %d → %d mV (cached)", core_index, offset)
             except Exception as e:
-                # Fallback: cache-only mode if SMU command fails
                 logger.warning("SMU write failed for core %d: %s. Using cache-only mode.", core_index, e)
                 self.co_cache[core_index] = offset
                 self._save_co_cache()
 
     def reset_all_offsets(self) -> None:
-        """Reset every core's offset to 0 mV."""
         if self.generation == self.Generation.VERMEER:
             self._smu_command_with_retry(self.V_RESET_ALL, 0)
         elif self.generation in (self.Generation.GRANITE_RIDGE, self.Generation.RAPHAEL):
@@ -403,11 +341,7 @@ class RyzenSMU:
                 self.set_core_offset(i, 0)
         logger.debug("Reset all offsets")
 
-    # ------------------------------------------------------------------
-    # Granite Ridge cache (write‑only hardware)
-    # ------------------------------------------------------------------
     def _load_co_cache(self) -> None:
-        """Load the Curve Optimizer offset cache from disk."""
         if CO_CACHE_FILE.is_file():
             try:
                 with open(CO_CACHE_FILE) as f:
@@ -421,21 +355,16 @@ class RyzenSMU:
             self.co_cache = {}
 
     def _save_co_cache(self) -> None:
-        """Persist the current CO cache to disk."""
         data = {str(i): self.co_cache.get(i, 0) for i in range(self.core_count)}
         write_json_atomic(CO_CACHE_FILE, data)
 
-    # ------------------------------------------------------------------
-    # Generation detection
-    # ------------------------------------------------------------------
     def _detect_generation(self) -> Generation:
-        """Detect the Ryzen generation from sysfs or fallback to /proc/cpuinfo."""
         if self.CODENAME_PATH.is_file():
             try:
                 codenum = int(self.CODENAME_PATH.read_text().strip())
                 gen = self.CODENAME_MAP.get(codenum)
                 if gen is not None:
-                    logger.info("Detected generation from codename %d: %s", codenum, gen.value)
+                    logger.debug("Detected generation from codename %d: %s", codenum, gen.value)
                     return gen
                 logger.debug("Codename %d not in mapping, trying fallback...", codenum)
             except (ValueError, OSError) as e:
@@ -443,22 +372,15 @@ class RyzenSMU:
 
         gen = detect_generation_from_cpuinfo()
         if gen is not None:
-            logger.info("Detected generation from CPU model: %s", gen.value)
+            logger.debug("Detected generation from CPU model: %s", gen.value)
             return gen
 
         logger.warning("Could not determine CPU generation – treating as unsupported")
         return self.Generation.UNSUPPORTED
 
-# ----------------------------------------------------------------------------
-# Core detection (linear indices using APIC IDs)
-# ----------------------------------------------------------------------------
 def get_physical_apic_ids_sorted() -> List[int]:
-    """
-    Return a sorted list of APIC IDs of physical cores (one per core).
-    Falls back to logical core count if sysfs is missing (assumes identity mapping).
-    """
     cpu_path = Path("/sys/devices/system/cpu")
-    core_apic = {}   # core_id -> APIC ID of first logical CPU seen
+    core_apic = {}
     for cpu_dir in sorted(cpu_path.glob("cpu[0-9]*")):
         try:
             core_id_file = cpu_dir / "topology" / "core_id"
@@ -466,28 +388,23 @@ def get_physical_apic_ids_sorted() -> List[int]:
             if not core_id_file.exists() or not apic_id_file.exists():
                 continue
             core_id = int(core_id_file.read_text().strip())
-            # Take the APIC ID of the first logical processor for each physical core
             if core_id not in core_apic:
                 apic_id = int(apic_id_file.read_text().strip())
                 core_apic[core_id] = apic_id
         except (ValueError, OSError):
             pass
     if core_apic:
-        # Return sorted by core_id for a stable linear ordering
         return [apic for core_id, apic in sorted(core_apic.items())]
 
-    # Fallback: /proc/cpuinfo core count
     try:
         with open("/proc/cpuinfo") as f:
             for line in f:
                 if line.startswith("cpu cores"):
                     cores = int(line.split(":")[1].strip())
-                    # assume identity mapping 0..N-1
                     return list(range(cores))
     except Exception:
         pass
 
-    # Last resort: half logical cores
     total_logical = os.cpu_count() or 8
     try:
         with open("/proc/cpuinfo") as f:
@@ -499,10 +416,6 @@ def get_physical_apic_ids_sorted() -> List[int]:
     return list(range(physical))
 
 def parse_core_range(spec: str, core_count: Optional[int] = None) -> List[int]:
-    """
-    Parse a core specification string like '0,2-5,7' into a sorted list
-    of linear core indices, validated against the given `core_count`.
-    """
     if core_count is None:
         core_count = len(get_physical_apic_ids_sorted())
     cores = set()
@@ -525,15 +438,10 @@ def parse_core_range(spec: str, core_count: Optional[int] = None) -> List[int]:
         raise ValueError(f"Core index(es) {sorted(invalid)} do not exist. Available: 0-{core_count-1}")
     return sorted(cores)
 
-# ----------------------------------------------------------------------------
-# Profile and offset validation
-# ----------------------------------------------------------------------------
 def validate_profile_name(name: str) -> bool:
-    """Profile names may contain letters, digits, underscores, hyphens, and dots."""
     return bool(re.match(r'^[a-zA-Z0-9_.-]+$', name))
 
 def ensure_valid_offset(value: Any, context: str = "offset") -> int:
-    """Raise if `value` is not an integer in [MIN_OFFSET, MAX_OFFSET]."""
     if not isinstance(value, int):
         raise ValueError(f"{context}: offset must be an integer")
     if not (RyzenSMU.MIN_OFFSET <= value <= RyzenSMU.MAX_OFFSET):
@@ -544,7 +452,6 @@ def ensure_valid_offset(value: Any, context: str = "offset") -> int:
     return value
 
 def validate_profile_data(data: Any) -> Dict[int, int]:
-    """Validate a raw JSON‑decoded profile dict and return a clean {core_index: offset}."""
     if not isinstance(data, dict):
         raise ValueError("Invalid profile JSON: expected an object mapping core indices to offsets")
     validated: Dict[int, int] = {}
@@ -557,16 +464,11 @@ def validate_profile_data(data: Any) -> Dict[int, int]:
     return validated
 
 def load_and_validate_profile_data(profile_path: Path) -> Dict[int, int]:
-    """Load a profile JSON file and return validated data."""
     with open(profile_path) as f:
         data = json.load(f)
     return validate_profile_data(data)
 
-# ----------------------------------------------------------------------------
-# Atomic file writes
-# ----------------------------------------------------------------------------
 def write_json_atomic(path: Path, data: Any, mode: int = 0o644) -> None:
-    """Atomically write JSON data to `path` using a temp file + rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
@@ -581,7 +483,6 @@ def write_json_atomic(path: Path, data: Any, mode: int = 0o644) -> None:
             os.unlink(tmp_name)
 
 def write_text_atomic(path: Path, content: str, mode: int = 0o644) -> None:
-    """Atomically write text content to `path`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
@@ -595,11 +496,7 @@ def write_text_atomic(path: Path, content: str, mode: int = 0o644) -> None:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
 
-# ----------------------------------------------------------------------------
-# Profile operations
-# ----------------------------------------------------------------------------
 def save_current_offsets_as_profile(name: str) -> None:
-    """Save the current live offsets to a named profile."""
     if not RyzenSMU.driver_loaded():
         raise RuntimeError("Ryzen SMU driver not loaded.")
     smu = RyzenSMU()
@@ -608,7 +505,6 @@ def save_current_offsets_as_profile(name: str) -> None:
     logger.info("Profile '%s' saved.", name)
 
 def apply_profile_file(profile_path: Path) -> None:
-    """Apply a profile JSON file to the CPU."""
     if not RyzenSMU.driver_loaded():
         raise RuntimeError("Ryzen SMU driver not loaded.")
     smu = RyzenSMU()
@@ -626,15 +522,8 @@ def apply_profile_file(profile_path: Path) -> None:
         raise RuntimeError("Errors applying offsets:\n" + "\n".join(failed))
     logger.info("Profile '%s' applied.", profile_path.stem)
 
-# ----------------------------------------------------------------------------
-# CLI handlers (core operations)
-# ----------------------------------------------------------------------------
 def _set_cores(smu: RyzenSMU, cores: List[int], offset: int) -> None:
-    """
-    Set the same offset on a list of cores; attempts rollback on failure.
-    Prints applied cores or raises.
-    """
-    # Save original offsets for rollback
+    """Set the same offset on a list of cores; verifies the actual applied value."""
     original = {}
     for idx in cores:
         try:
@@ -649,10 +538,7 @@ def _set_cores(smu: RyzenSMU, cores: List[int], offset: int) -> None:
         for idx in cores:
             smu.set_core_offset(idx, offset)
             success.append(idx)
-        for idx in success:
-            print(f"Core {idx}: {offset} mV")
     except Exception as e:
-        # Rollback any successfully set cores
         print(f"Error setting core {idx}: {e}", file=sys.stderr)
         print("Attempting rollback...", file=sys.stderr)
         rollback_fail = []
@@ -667,6 +553,14 @@ def _set_cores(smu: RyzenSMU, cores: List[int], offset: int) -> None:
         else:
             print("Rollback successful.", file=sys.stderr)
         raise RuntimeError(f"Failed to set offset on core {idx} ({e})")
+
+    # Verify and report the actual applied offset
+    for idx in success:
+        real = smu.get_core_offset(idx)
+        if real == offset:
+            print(f"Core {idx}: {real} mV")
+        else:
+            print(f"Core {idx}: requested {offset} mV, actual {real} mV")
 
 def cli_status(args: argparse.Namespace) -> None:
     smu = RyzenSMU()
@@ -704,7 +598,6 @@ def cli_set(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 def cli_apply_list(args: argparse.Namespace) -> None:
-    """Apply a fixed offset to multiple cores (CLI: apply-list)."""
     smu = RyzenSMU()
     try:
         cores = parse_core_range(args.cores, smu.core_count)
@@ -737,9 +630,6 @@ def cli_reset(args: argparse.Namespace) -> None:
     smu.reset_all_offsets()
     print("All offsets reset to 0 mV")
 
-# ----------------------------------------------------------------------------
-# Profile management CLI
-# ----------------------------------------------------------------------------
 def cli_profile_list(args: argparse.Namespace) -> None:
     if PROFILES_DIR.exists():
         profiles = sorted(p.stem for p in PROFILES_DIR.glob("*.json"))
@@ -777,7 +667,6 @@ def cli_profile_delete(args: argparse.Namespace) -> None:
         print(f"Profile '{name}' deleted.")
 
 def cli_profile_apply(args: argparse.Namespace) -> None:
-    """Alias: profile apply → same as apply command."""
     args.name = args.profile_name
     cli_apply_profile(args)
 
@@ -826,9 +715,6 @@ def cli_profile_update(args: argparse.Namespace) -> None:
                 sys.exit(1)
             print("Applied to CPU.")
 
-# ----------------------------------------------------------------------------
-# Boot service CLI (improved with driver dependency)
-# ----------------------------------------------------------------------------
 def cli_boot_enable(args: argparse.Namespace) -> None:
     name = args.name.strip()
     profile_path = PROFILES_DIR / f"{name}.json"
@@ -895,9 +781,6 @@ def cli_boot_status(args: argparse.Namespace) -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-# ----------------------------------------------------------------------------
-# CLI entry point (unchanged logic, but relies on fixed functions)
-# ----------------------------------------------------------------------------
 def cli_mode(cli_args: List[str]) -> None:
     acquire_lock()
 
@@ -917,7 +800,6 @@ For negative offsets with 'apply-list', use '--' before the offset:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # --- core commands ---
     status_parser = subparsers.add_parser("status", help="Show current core voltage offsets")
     status_parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
@@ -937,7 +819,6 @@ For negative offsets with 'apply-list', use '--' before the offset:
 
     subparsers.add_parser("reset", help="Reset all offsets to 0 mV")
 
-    # --- profile commands ---
     profile_parser = subparsers.add_parser("profile", help="Manage profiles")
     profile_sub = profile_parser.add_subparsers(dest="profile_cmd", required=True)
     profile_sub.add_parser("list", help="List saved profiles")
@@ -955,7 +836,6 @@ For negative offsets with 'apply-list', use '--' before the offset:
     profile_update.add_argument("--offset", type=int, required=True, help="New offset in mV")
     profile_update.add_argument("--apply", action="store_true", help="Apply updated offsets to CPU immediately")
 
-    # --- boot commands ---
     boot_parser = subparsers.add_parser("boot", help="Manage boot-time application")
     boot_sub = boot_parser.add_subparsers(dest="boot_cmd", required=True)
     boot_enable = boot_sub.add_parser("enable", help="Enable automatic profile application at boot")
@@ -963,8 +843,7 @@ For negative offsets with 'apply-list', use '--' before the offset:
     boot_sub.add_parser("disable", help="Disable boot-time application")
     boot_sub.add_parser("status", help="Show boot service status")
 
-    # --- internal privileged commands (hidden) ---
-    subparsers.add_parser("list", help=argparse.SUPPRESS)          # alias for status
+    subparsers.add_parser("list", help=argparse.SUPPRESS)
     apply_file_parser = subparsers.add_parser("apply-file", help=argparse.SUPPRESS)
     apply_file_parser.add_argument("file", type=str)
     read_profile_parser = subparsers.add_parser("read-profile", help=argparse.SUPPRESS)
@@ -983,9 +862,6 @@ For negative offsets with 'apply-list', use '--' before the offset:
 
     args = parser.parse_args(cli_args)
 
-    # ------------------------------------------------------------------
-    # Internal privileged command implementations
-    # ------------------------------------------------------------------
     def _resolve_profile_path(raw_path: str) -> Path:
         path = Path(raw_path).resolve()
         try:
@@ -1070,27 +946,21 @@ For negative offsets with 'apply-list', use '--' before the offset:
             sys.exit(1)
         return
 
-    # ------------------------------------------------------------------
-    # Public aliases
-    # ------------------------------------------------------------------
     if args.command == "list":
         args.command = "status"
     elif args.command == "apply-file":
         args.command = "apply"
         args.name = Path(args.file).stem
 
-    # All following commands require the driver
     if not RyzenSMU.driver_loaded():
         print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
         sys.exit(1)
 
-    # -------- NEW: Unsupported CPU warning (non‑blocking) --------
     try:
         smu = RyzenSMU()
         if smu.generation == RyzenSMU.Generation.UNSUPPORTED:
             print("Warning: Unsupported CPU detected. Only Ryzen 5000 and 9000 series are supported. "
                   "Operation will continue at your own risk.", file=sys.stderr)
-        # Note: we do NOT exit – we continue anyway
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1131,9 +1001,6 @@ For negative offsets with 'apply-list', use '--' before the offset:
     else:
         parser.print_help()
 
-# ----------------------------------------------------------------------------
-# GUI components (only if PyQt6 is available)
-# ----------------------------------------------------------------------------
 if GUI_AVAILABLE:
 
     class WorkerThread(QThread):
@@ -1175,7 +1042,6 @@ if GUI_AVAILABLE:
             self.resize(800, 600)
             self._set_window_icon()
 
-            # Quick SMU probe to get generation & core count (driver must be loaded)
             try:
                 smu = RyzenSMU()
                 self.generation = smu.generation
@@ -1184,7 +1050,6 @@ if GUI_AVAILABLE:
                 QMessageBox.critical(None, "Error", f"Failed to initialise SMU:\n{e}")
                 sys.exit(1)
 
-            # -------- NEW: Unsupported CPU popup (non‑blocking warning) --------
             if self.generation == RyzenSMU.Generation.UNSUPPORTED:
                 QMessageBox.warning(
                     None,
@@ -1197,7 +1062,6 @@ if GUI_AVAILABLE:
                     "can cause instability or system damage.\n\n"
                     "Click OK to continue."
                 )
-                # No sys.exit(1) – the GUI remains open
 
             self.workers: List[QThread] = []
             self._busy = False
@@ -1205,9 +1069,6 @@ if GUI_AVAILABLE:
             self.refresh_profile_list()
             self.list_offsets()
 
-        # ------------------------------------------------------------------
-        # UI helpers
-        # ------------------------------------------------------------------
         def _set_window_icon(self) -> None:
             icon = QIcon.fromTheme("ruv-gui")
             if icon.isNull() and os.path.exists(ICON_FALLBACK_PATH):
@@ -1226,7 +1087,6 @@ if GUI_AVAILABLE:
             splitter = QSplitter(Qt.Orientation.Horizontal)
             main_layout.addWidget(splitter, 1)
 
-            # Left: core list
             left_widget = QWidget()
             left_layout = QVBoxLayout(left_widget)
             left_layout.setContentsMargins(0, 0, 0, 0)
@@ -1235,7 +1095,6 @@ if GUI_AVAILABLE:
             left_layout.addWidget(self.core_list)
             splitter.addWidget(left_widget)
 
-            # Right: controls
             right_widget = QWidget()
             right_layout = QVBoxLayout(right_widget)
             right_layout.setContentsMargins(10, 0, 0, 0)
@@ -1266,7 +1125,6 @@ if GUI_AVAILABLE:
             right_widget.setMinimumWidth(180)
             splitter.setSizes([int(self.width() * 0.6), int(self.width() * 0.4)])
 
-            # Profile management
             profile_layout = QHBoxLayout()
             profile_layout.setSpacing(5)
             profile_layout.addWidget(QLabel("Profile:"))
@@ -1284,7 +1142,6 @@ if GUI_AVAILABLE:
             profile_layout.addStretch()
             main_layout.addLayout(profile_layout)
 
-            # Boot service
             boot_layout = QHBoxLayout()
             boot_layout.setSpacing(10)
             self.btn_set_boot = QPushButton("Set as Boot Profile")
@@ -1294,13 +1151,11 @@ if GUI_AVAILABLE:
             boot_layout.addStretch()
             main_layout.addLayout(boot_layout)
 
-            # Output log
             self.output = QTextEdit()
             self.output.setReadOnly(True)
             self.output.setMaximumHeight(150)
             main_layout.addWidget(self.output)
 
-            # Connections
             self.btn_list.clicked.connect(self.list_offsets)
             self.btn_reset.clicked.connect(self.reset_offsets)
             self.btn_apply.clicked.connect(self.apply_offset)
@@ -1364,9 +1219,6 @@ if GUI_AVAILABLE:
             self.workers.append(worker)
             worker.start()
 
-        # ------------------------------------------------------------------
-        # GUI actions
-        # ------------------------------------------------------------------
         def list_offsets(self) -> None:
             def on_finish(output: str) -> None:
                 self.output.setText(output)
@@ -1471,7 +1323,6 @@ if GUI_AVAILABLE:
                         if reply == QMessageBox.StandardButton.Yes:
                             def on_apply_done(output: str) -> None:
                                 self.output.setText(f"Profile updated and applied to selected cores.\n{output}")
-                                # Do not reset spinbox; user may want to keep the value
                             apply_args = ["apply-list", ",".join(map(str, selected)), str(new_offset)]
                             self._run_privileged_async(apply_args, on_apply_done)
                         else:
@@ -1524,9 +1375,6 @@ WantedBy=multi-user.target
                 self.output.setText("Boot service removed.")
             self._run_privileged_async(["remove-boot-service"], on_done)
 
-# ----------------------------------------------------------------------------
-# Main guard
-# ----------------------------------------------------------------------------
 if __name__ == "__main__":
     if len(sys.argv) == 1 and os.geteuid() == 0:
         print("ERROR: Do not run the GUI as root.", file=sys.stderr)
