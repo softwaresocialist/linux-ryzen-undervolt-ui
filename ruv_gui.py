@@ -1084,6 +1084,17 @@ For negative offsets with 'apply-list', use '--' before the offset:
         print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
         sys.exit(1)
 
+    # -------- NEW: Unsupported CPU check for CLI --------
+    try:
+        smu = RyzenSMU()
+        if smu.generation == RyzenSMU.Generation.UNSUPPORTED:
+            print("Error: Unsupported CPU detected. Only Ryzen 5000 and 9000 series are supported.",
+                  file=sys.stderr)
+            sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     handlers = {
         "status": cli_status,
         "get": cli_get,
@@ -1171,6 +1182,19 @@ if GUI_AVAILABLE:
                 self.core_count = smu.core_count
             except Exception as e:
                 QMessageBox.critical(None, "Error", f"Failed to initialise SMU:\n{e}")
+                sys.exit(1)
+
+            # -------- NEW: Unsupported CPU popup for GUI --------
+            if self.generation == RyzenSMU.Generation.UNSUPPORTED:
+                QMessageBox.critical(
+                    None,
+                    "Unsupported CPU",
+                    "Your CPU is not supported by this tool.\n\n"
+                    "Ryzen Undervolt supports only:\n"
+                    "• Ryzen 5000 series (Vermeer)\n"
+                    "• Ryzen 9000 series (Granite Ridge)\n\n"
+                    "The application will now close."
+                )
                 sys.exit(1)
 
             self.workers: List[QThread] = []
