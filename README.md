@@ -119,3 +119,5 @@ sudo ruv-gui boot status
 ```bash
 sudo ruv-gui boot disable
 ```
+
+### SPECIAL THANKS TO u/NeySlim FOR TESTING AND FIXIG ON ryzen 9000
