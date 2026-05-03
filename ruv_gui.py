@@ -1084,13 +1084,13 @@ For negative offsets with 'apply-list', use '--' before the offset:
         print("Error: Ryzen SMU driver not loaded.", file=sys.stderr)
         sys.exit(1)
 
-    # -------- NEW: Unsupported CPU check for CLI --------
+    # -------- NEW: Unsupported CPU warning (non‑blocking) --------
     try:
         smu = RyzenSMU()
         if smu.generation == RyzenSMU.Generation.UNSUPPORTED:
-            print("Error: Unsupported CPU detected. Only Ryzen 5000 and 9000 series are supported.",
-                  file=sys.stderr)
-            sys.exit(1)
+            print("Warning: Unsupported CPU detected. Only Ryzen 5000 and 9000 series are supported. "
+                  "Operation will continue at your own risk.", file=sys.stderr)
+        # Note: we do NOT exit – we continue anyway
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1184,18 +1184,20 @@ if GUI_AVAILABLE:
                 QMessageBox.critical(None, "Error", f"Failed to initialise SMU:\n{e}")
                 sys.exit(1)
 
-            # -------- NEW: Unsupported CPU popup for GUI --------
+            # -------- NEW: Unsupported CPU popup (non‑blocking warning) --------
             if self.generation == RyzenSMU.Generation.UNSUPPORTED:
-                QMessageBox.critical(
+                QMessageBox.warning(
                     None,
                     "Unsupported CPU",
-                    "Your CPU is not supported by this tool.\n\n"
-                    "Ryzen Undervolt supports only:\n"
+                    "Your CPU is not officially supported by this tool.\n\n"
+                    "The tool is designed for:\n"
                     "• Ryzen 5000 series (Vermeer)\n"
                     "• Ryzen 9000 series (Granite Ridge)\n\n"
-                    "The application will now close."
+                    "You may continue at your own risk. Undervolting on unsupported CPUs "
+                    "can cause instability or system damage.\n\n"
+                    "Click OK to continue."
                 )
-                sys.exit(1)
+                # No sys.exit(1) – the GUI remains open
 
             self.workers: List[QThread] = []
             self._busy = False
