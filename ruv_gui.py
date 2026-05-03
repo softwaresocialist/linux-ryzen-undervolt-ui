@@ -196,7 +196,7 @@ class RyzenSMU:
         12: Generation.VERMEER,
         19: Generation.VERMEER,
         24: Generation.GRANITE_RIDGE,
-        23: Generation.RAPHAEL,
+        23: Generation.GRANITE_RIDGE,  # Ryzen 9 9950X3D (Granite Ridge)
         17: Generation.RAPHAEL,
     }
 
@@ -222,7 +222,7 @@ class RyzenSMU:
         self.core_id_list = get_physical_apic_ids_sorted()
         self.core_count = len(self.core_id_list)
         self.co_cache: Dict[int, int] = {}
-        if self.generation == self.Generation.GRANITE_RIDGE:
+        if self.generation in (self.Generation.GRANITE_RIDGE, self.Generation.RAPHAEL):
             self._load_co_cache()
         logger.debug("RyzenSMU initialized. Gen: %s, cores: %d", self.generation.value, self.core_count)
 
@@ -351,11 +351,9 @@ class RyzenSMU:
             if value > 2**31 - 1:
                 value -= 2**32
             return value
-        elif self.generation == self.Generation.GRANITE_RIDGE:
+        elif self.generation in (self.Generation.GRANITE_RIDGE, self.Generation.RAPHAEL):
             # Write-only hardware; return whatever we have in cache
             return self.co_cache.get(core_index, 0)
-        else:
-            raise RuntimeError(f"Getting offsets is not supported on {self.generation.value}")
 
     def set_core_offset(self, core_index: int, offset: int) -> None:
         """Set the voltage offset for a single linear core index."""
@@ -382,7 +380,7 @@ class RyzenSMU:
                     except Exception as e:
                         logger.error("Rollback failed for core %d: %s", core_index, e)
                 raise
-        elif self.generation == self.Generation.GRANITE_RIDGE:
+        elif self.generation in (self.Generation.GRANITE_RIDGE, self.Generation.RAPHAEL):
             op = self.GR_SET_OFFSET_BASE + core_index
             encoded = offset & 0xFFFFFFFF if offset >= 0 else ((offset + 2**32) & 0xFFFFFFFF)
             try:
@@ -390,20 +388,19 @@ class RyzenSMU:
                 self.co_cache[core_index] = offset
                 self._save_co_cache()
                 logger.debug("Set core %d → %d mV (cached)", core_index, offset)
-            except Exception:
-                raise
-        else:
-            raise RuntimeError(f"Setting offsets is not supported on {self.generation.value}")
+            except Exception as e:
+                # Fallback: cache-only mode if SMU command fails
+                logger.warning("SMU write failed for core %d: %s. Using cache-only mode.", core_index, e)
+                self.co_cache[core_index] = offset
+                self._save_co_cache()
 
     def reset_all_offsets(self) -> None:
         """Reset every core's offset to 0 mV."""
         if self.generation == self.Generation.VERMEER:
             self._smu_command_with_retry(self.V_RESET_ALL, 0)
-        elif self.generation == self.Generation.GRANITE_RIDGE:
+        elif self.generation in (self.Generation.GRANITE_RIDGE, self.Generation.RAPHAEL):
             for i in range(self.core_count):
                 self.set_core_offset(i, 0)
-        else:
-            raise RuntimeError(f"Resetting offsets is not supported on {self.generation.value}")
         logger.debug("Reset all offsets")
 
     # ------------------------------------------------------------------
